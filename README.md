@@ -1,6 +1,15 @@
 # SwiftCentrifuge
 
-Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) server and [Centrifuge](https://github.com/centrifugal/centrifuge) library. 
+## About this fork
+
+This is the ImpulseM fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained for [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo). The public API matches upstream, so the upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
+
+Sibling SDKs from the same organization:
+
+- JavaScript: [ImpulseM.Centrifugo.Client.JS](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS) (npm `@impulsem/centrifuge`)
+- Android (Java): [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java)
+
+Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) server and [Centrifuge](https://github.com/centrifugal/centrifuge) library.
 
 There is no v1 release of this library yet – API still evolves. At the moment patch version updates only contain backwards compatible changes, minor version updates can have backwards incompatible API changes.
 
@@ -8,11 +17,13 @@ Check out [client SDK API specification](https://centrifugal.dev/docs/transports
 
 The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
-> **The latest `centrifuge-swift` is compatible with [Centrifugo](https://github.com/centrifugal/centrifugo) server v6, v5 and v4 and [Centrifuge](https://github.com/centrifugal/centrifuge) >= 0.25.0. For Centrifugo v2, Centrifugo v3 and Centrifuge < 0.25.0 you should use `centrifuge-swift` v0.4.6.**
+> **This SDK is compatible with [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo) and upstream [Centrifugo](https://github.com/centrifugal/centrifugo) v6.**
 
 ## Installation
 
-### Swift Package Manager (recommended)
+This library is distributed through Swift Package Manager only. CocoaPods and Carthage are not supported.
+
+### Swift Package Manager
 
 In Xcode, use `File` -> `Add Package Dependencies...` and enter:
 
@@ -20,27 +31,21 @@ In Xcode, use `File` -> `Add Package Dependencies...` and enter:
 https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git
 ```
 
-Or add it to your `Package.swift` dependencies (replace `<version>` with the latest [release tag](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift/releases)):
+Or add it to your `Package.swift` dependencies:
 
 ```swift
-.package(url: "https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git", from: "<version>")
+.package(url: "https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git", from: "1.0.0")
 ```
+
+The module and product name is `SwiftCentrifuge`, so import it as:
+
+```swift
+import SwiftCentrifuge
+```
+
+Versions follow semantic versioning and are published as git tags `vX.Y.Z`. See the [releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift/releases) for the list of available versions and their changes.
 
 If you get a warning complaining about missing pc file, you may need to install `pkg-config`. On macOS, this can be achieved with `brew install pkg-config`.
-
-### CocoaPods
-
-CocoaPods support is still maintained, but SPM is the primary and recommended way to install this library going forward.
-
-To integrate SwiftCentrifuge into your Xcode project using CocoaPods, specify it in your `Podfile`:
-
-```ruby
-pod 'SwiftCentrifuge'
-```
-
-### Manual
-
-Clone the repo and drag files from `Sources` folder into your Xcode project.
 
 ## Dependencies
 
@@ -49,9 +54,7 @@ This library depends on [SwiftProtobuf](https://github.com/apple/swift-protobuf)
 ## Requirements
 
 - iOS 12.0
-- Xcode 16.0 to build via Swift Package Manager — the package manifest declares
-  `swift-tools-version:6.0`, which needs a Swift 6.0 toolchain. Consuming the
-  library through CocoaPods has no such requirement.
+- Xcode 16.0 or newer. The package manifest declares `swift-tools-version:6.0`, which needs a Swift 6.0 toolchain.
 
 ## Getting Started
 
@@ -63,7 +66,7 @@ When a mobile application goes to the background there are OS-specific limitatio
 
 ## Using URLSessionWebSocketTask
 
-See `useNativeWebSocket` option of Client which allows using `URLSessionWebSocketTask` instead of our fork of Starscream v3. Please report if you have successful setup of `centrifuge-swift` with `URLSessionWebSocketTask` – so we could eventually make it default.
+See `useNativeWebSocket` option of Client which allows using `URLSessionWebSocketTask` instead of our fork of Starscream v3. Please report if you have successful setup of SwiftCentrifuge with `URLSessionWebSocketTask` – so we could eventually make it default.
 
 ### URLSessionWebSocketTask: configuring Proxy Settings
 
@@ -77,7 +80,7 @@ After verifying that the proxy tool works as expected, disable the system-wide p
 4.    Configure CentrifugeClient for proxying:
 Use the `urlSessionConfigurationProvider` option in `CentrifugeClientConfig` to explicitly provide proxy settings for `URLSessionWebSocketTask`.
 5.    Test the connection:
-Run your application and ensure that WebSocket traffic from centrifuge-swift is properly routed through your proxy tool.
+Run your application and ensure that WebSocket traffic from SwiftCentrifuge is properly routed through your proxy tool.
 
 ## Running tests
 
@@ -106,17 +109,13 @@ SwiftCentrifuge is available under the MIT license. See LICENSE for details.
 
 ## Release (for maintainers)
 
-Swift Package Manager needs no publish step - pushing a version tag is enough for SPM consumers to pick it up. Releases are also automated via the [`release`](.github/workflows/release.yml) GitHub Actions workflow, which publishes the podspec to CocoaPods trunk for CocoaPods consumers. No local Xcode or CocoaPods setup is required.
+Consumers pick up a release through its git tag, so no separate publish step is needed for Swift Package Manager. Releases are created by the [`release`](.github/workflows/release.yml) GitHub Actions workflow, which validates the version, runs the tests, tags the version and publishes a GitHub Release.
 
-1. Bump `s.version` in `SwiftCentrifuge.podspec`.
-2. Push to `master` and create a matching version tag (e.g. `0.9.0`).
+There are two ways to run it:
 
-Pushing the tag triggers the workflow automatically. The workflow verifies that the podspec version matches the tag before pushing, so make sure the version is bumped before tagging.
-
-To (re)publish an already-existing tag manually:
+1. Push a version tag, for example `v1.0.1`.
+2. Run the workflow manually from the Actions tab, or from the command line with a version without the leading `v`:
 
 ```
-gh workflow run release.yml -f tag=0.9.0
+gh workflow run release.yml -f version=1.0.1
 ```
-
-The workflow authenticates to CocoaPods trunk using the `COCOAPODS_TRUNK_TOKEN` repository secret.
