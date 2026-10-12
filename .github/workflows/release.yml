@@ -14,7 +14,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
@@ -91,6 +91,8 @@ jobs:
     name: Test
     needs:
       - validate
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   tag:
@@ -100,6 +102,8 @@ jobs:
       - test
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -121,6 +125,8 @@ jobs:
     # already have their tag), but never after a failed or cancelled upstream job.
     if: ${{ always() && needs.validate.result == 'success' && needs.test.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       PRERELEASE: ${{ needs.validate.outputs.prerelease }}
