@@ -1,11 +1,20 @@
 name: build
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # Called by release.yml. Inside a called workflow, github.event_name is the caller's event.
+  workflow_call:
 jobs:
   test:
     name: Test
     runs-on: macos-15
-    # Prevent duplicate builds on internal PRs.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # Prevent duplicate builds on internal PRs. Release runs (workflow_dispatch or
+    # workflow_call) always run the tests.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

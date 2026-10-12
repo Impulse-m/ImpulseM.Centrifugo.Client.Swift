@@ -1,64 +1,139 @@
 name: release
+
 on:
-  # Automatically release when a version tag is pushed.
+  # Release when a version tag is pushed.
   push:
     tags:
-      - '*'
-  # Allow releasing an already-existing tag manually. workflow_dispatch runs this
-  # file from the default branch, so the tag to release is passed as an input and
-  # checked out explicitly below.
+      - 'v*'
+  # Release from a branch: validates, tests, then tags and publishes.
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Existing git tag to publish (e.g. 0.9.0)'
+      version:
+        description: 'Version without the leading v, e.g. 1.0.0 or 1.1.0-rc.1'
         required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  publish:
-    name: Push podspec to CocoaPods trunk
-    runs-on: macos-15
-    env:
-      # The tag being released: the dispatch input when run manually, otherwise
-      # the pushed tag.
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - name: Checkout tag
+      - name: Checkout code
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-      - name: Verify podspec version matches the tag
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          SPEC_VERSION=$(grep -E "s\.version" SwiftCentrifuge.podspec | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
-          echo "Tag: $TAG, podspec version: $SPEC_VERSION"
-          if [ "$SPEC_VERSION" != "$TAG" ]; then
-            echo "::error::podspec version ($SPEC_VERSION) does not match tag ($TAG)"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#v}"
+          fi
+
+          semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::Invalid version '${version}'. Expected semver without the leading v, e.g. 1.0.0 or 1.1.0-rc.1."
             exit 1
           fi
-      - name: Push to CocoaPods trunk
-        env:
-          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+
+          tag="v${version}"
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            remote_tag="$(git ls-remote --tags origin "refs/tags/${tag}")"
+            if [ -n "$remote_tag" ]; then
+              echo "::error::Tag ${tag} already exists on origin."
+              exit 1
+            fi
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${tag} already exists."
+            exit 1
+          fi
+
+          if [ "$prerelease" = "false" ]; then
+            highest="$(gh release list --exclude-pre-releases --limit 1000 --json tagName --jq '.[].tagName' | sed 's/^v//' | sort -V | tail -n 1)"
+            if [ -n "$highest" ]; then
+              newest="$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -n 1)"
+              if [ "$highest" = "$version" ] || [ "$newest" != "$version" ]; then
+                echo "::error::Version ${version} is not greater than the latest release v${highest}."
+                exit 1
+              fi
+            fi
+          fi
+
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs:
+      - validate
+    uses: ./.github/workflows/ci.yml
+
+  tag:
+    name: Create tag
+    needs:
+      - validate
+      - test
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Create and push tag
         run: |
-          # CocoaPods trunk is flaky: it occasionally 500s on the push response even
-          # though the version was actually accepted, and/or the CDN needs a moment to
-          # catch up. Retry, and treat "duplicate entry" as success since that only
-          # happens once our version is already published (whether by this attempt's
-          # predecessor or an earlier CI run).
-          max_attempts=3
-          for attempt in $(seq 1 "$max_attempts"); do
-            echo "Attempt $attempt of $max_attempts..."
-            if output=$(pod trunk push SwiftCentrifuge.podspec --allow-warnings 2>&1); then
-              echo "$output"
-              echo "Push succeeded."
-              exit 0
-            fi
-            echo "$output"
-            if echo "$output" | grep -qi "Unable to accept duplicate entry"; then
-              echo "Version $TAG is already present on trunk (duplicate entry) - treating as success."
-              exit 0
-            fi
-            if [ "$attempt" -lt "$max_attempts" ]; then
-              echo "Push failed, retrying in 30s..."
-              sleep 30
-            fi
-          done
-          echo "::error::pod trunk push failed after $max_attempts attempts (see log above)."
-          exit 1
+          git tag "v${VERSION}" "$GITHUB_SHA"
+          git push origin "refs/tags/v${VERSION}"
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - validate
+      - test
+      - tag
+    # Runs after a tag job that succeeded or was skipped (tag push events
+    # already have their tag), but never after a failed or cancelled upstream job.
+    if: ${{ always() && needs.validate.result == 'success' && needs.test.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create GitHub Release
+        run: |
+          args=(--verify-tag --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+
+          gh release create "v${VERSION}" "${args[@]}"

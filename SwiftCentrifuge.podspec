@@ -4,7 +4,7 @@ Pod::Spec.new do |s|
     s.swift_version         = '5.0'
     s.version               = '0.10.4'
 
-    s.homepage              = 'https://github.com/centrifugal/centrifuge-swift'
+    s.homepage              = 'https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift'
     s.summary               = 'Centrifugo and Centrifuge client in Swift'
 
     s.author                = { 'Alexander Emelin' => 'frvzmb@gmail.com' }
@@ -13,7 +13,7 @@ Pod::Spec.new do |s|
     s.ios.deployment_target = '12.0'
 
     s.source_files          = 'Sources/SwiftCentrifuge/*.swift', 'Sources/SwiftCentrifuge/WebSocket/*.swift'
-    s.source                = { :git => 'https://github.com/centrifugal/centrifuge-swift.git', :tag => s.version }
+    s.source                = { :git => 'https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git', :tag => s.version }
 
     s.dependency 'SwiftProtobuf'
 end
