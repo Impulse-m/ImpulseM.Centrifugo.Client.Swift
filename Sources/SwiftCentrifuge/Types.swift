@@ -53,9 +53,13 @@ public struct CentrifugePublishResult {
 
 public struct CentrifugeRpcResult {
     public let data: Data
+    /// Whether the server answered from its record of an earlier call with the same msg_id,
+    /// so the call did not run again. Only a tracked call can get such an answer.
+    public let cached: Bool
 
-    public init(data: Data) {
+    public init(data: Data, cached: Bool = false) {
         self.data = data
+        self.cached = cached
     }
 }
 

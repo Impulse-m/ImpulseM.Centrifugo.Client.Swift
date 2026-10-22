@@ -79,7 +79,8 @@ struct ManualClientSetup {
 func makeManualClient(
     endpoint: String,
     config: CentrifugeClientConfig,
-    delegate: CentrifugeClientDelegate? = nil
+    delegate: CentrifugeClientDelegate? = nil,
+    random: ClientRandom = SystemClientRandom()
 ) -> ManualClientSetup {
     let clock: ManualClock = ManualClock()
     let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
@@ -95,7 +96,8 @@ func makeManualClient(
             )
             holder.set(manual)
             return manual
-        }
+        },
+        random: random
     )
     let scheduler: ManualScheduler = holder.current!
     return ManualClientSetup(client: client, clock: clock, scheduler: scheduler)

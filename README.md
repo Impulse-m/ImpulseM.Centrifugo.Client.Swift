@@ -68,6 +68,33 @@ An [example app](Example) is included demonstrating basic client functionality.
 - `serverTimeMillis()` returns the server time: the local clock plus the offset of the last command reply that carried a time. It needs `client.reply_include_server_time` on the server. Before such a reply it returns the local time.
 - `CentrifugeClientDelegate.onAuth(_:_:)` reports the `user` and `authClass` of the connection on every connect, and on a refresh that changes them.
 
+## Tracked rpc calls
+
+A call made with `rpc(method:data:options:completion:)` is tracked when the client has an `instance` and the server confirmed the RPC options on the connection. A tracked call carries a msg_id, so the server runs it at most once. Its reply is acknowledged with the next command, and a call that was written when the connection was lost is sent again on the next connection, with the same msg_id and `retransmit` set. The rpc method returns a `CentrifugeRpcCall`; `cancel()` on it fails a call that is not sent yet, and sends a cancel to the server for a sent one.
+
+- `CentrifugeRpcOptions` carries the headers of the call and its `timeout`, the deadline across all its attempts. The explicit timeout must be above 0 and no more than `CentrifugeClientConfig.timeout`.
+- `CentrifugeClientConfig.maxPendingRpc` (default 32, at least 1) bounds the calls of a client with an instance that are not settled yet. A call beyond it fails at once with code 16. A client without an instance has no bound.
+- A server error that the server answers with `x-centrifugo-retry` metadata was not executed. `new_msg_id` makes the client resend the call with a new msg_id, at most twice; `later` resends it with the same msg_id after a delay, at most three times. The error of the last attempt reaches the completion unchanged.
+- `CentrifugeRpcResult.cached` is true when the server answered from its record of an earlier call with the same msg_id.
+- A call on a connection without the RPC options is sent as a plain request. Its headers cannot be carried, so such a call fails with code 15.
+
+**Breaking change (Swift fork v2.0.0):** a server error that carries an application code, type or metadata arrives as `CentrifugeError.replyErrorDetails(CentrifugeReplyError)`, not as `.replyError`. An app that matches only `.replyError` misses those errors. Errors without them stay `.replyError`. `CentrifugeError` gains the cases `connectionClosed`, `transportWriteError`, `clientRejected` and `replyErrorDetails`, so a `switch` over `CentrifugeError` needs a `default` case. `CentrifugeRpcResult` gains `cached`, and `CentrifugeClientConfig` gains `maxPendingRpc`, both with defaults.
+
+### Client error codes
+
+Codes 15 to 19 are reserved for client-local errors of the fork SDKs; a server never sends them. The Swift forms are:
+
+| Code | Swift form | Meaning |
+|---|---|---|
+| 10 | `transportWriteError(error:)` | The request could not be encoded, so the call was not sent. It does not report a transport write failure: the transport gives no write error signal. |
+| 11 | `connectionClosed` | The connection was lost while the call was on it, and the call cannot be resent on the next one. |
+| 12 | `configurationError(message:)` | The configuration cannot work, for example a refresh with no token and no getter, or an invalid instance. |
+| 15 | `replyError(code: 15, ...)` | The call was not sent: the connection cannot carry what it asks for (headers). |
+| 16 | `replyError(code: 16, ...)` | The call was not sent: `maxPendingRpc` is reached. |
+| 17 | `replyError(code: 17, ...)` | The call was cancelled with `cancel()`. |
+
+`clientRejected(code:message:)` carries the refusals the client makes itself, such as a closed rpc pool. It is never a server reply.
+
 ## Usage in background
 
 When a mobile application goes to the background there are OS-specific limitations for established persistent connections - which can be silently closed shortly. Thus in most cases you need to disconnect from a server when app moves to the background and connect again when app goes to the foreground.

@@ -37,6 +37,19 @@ internal func instanceConfigurationError(_ instance: String?) -> CentrifugeError
 }
 
 
+/// The configuration error of a client, or nil when the client can work: the instance (see
+/// `instanceConfigurationError`), and `maxPendingRpc` at least 1.
+internal func clientConfigurationError(_ config: CentrifugeClientConfig) -> CentrifugeError? {
+    if let error: CentrifugeError = instanceConfigurationError(config.instance) {
+        return error
+    }
+    if config.maxPendingRpc < 1 {
+        return CentrifugeError.configurationError(message: "maxPendingRpc must be at least 1")
+    }
+    return nil
+}
+
+
 /// One byte of an instance: A-Z, a-z, 0-9, `_` or `-`.
 private func isInstanceByte(_ byte: UInt8) -> Bool {
     switch byte {
@@ -53,13 +66,14 @@ public extension CentrifugeClient {
     /// still returns a client for such a configuration (and reports it through `onError` at
     /// `connect()`), this throws it at once.
     ///
-    /// - Throws: `CentrifugeError.configurationError` when `config.instance` is not valid.
+    /// - Throws: `CentrifugeError.configurationError` when `config.instance` is not valid, or
+    ///   `config.maxPendingRpc` is below 1.
     static func create(
         endpoint: String,
         config: CentrifugeClientConfig,
         delegate: CentrifugeClientDelegate? = nil
     ) throws -> CentrifugeClient {
-        if let error: CentrifugeError = instanceConfigurationError(config.instance) {
+        if let error: CentrifugeError = clientConfigurationError(config) {
             throw error
         }
         return CentrifugeClient(endpoint: endpoint, config: config, delegate: delegate)

@@ -24,6 +24,16 @@ public enum CentrifugeError: Error {
     case subscriptionGetStateError(error: Error)
     case subscriptionRefreshError(error: Error)
     case replyError(code: UInt32, message: String, temporary: Bool)
+    /// A server error reply that carries an application code, type or metadata (see `CentrifugeReplyError`).
+    case replyErrorDetails(CentrifugeReplyError)
+    /// The connection was lost while the call was on it, and the call cannot be resent on the next one.
+    case connectionClosed
+    /// The request of the call could not be encoded. The call was not sent. The transport gives no
+    /// write error signal, so this covers serialization failures only.
+    case transportWriteError(error: Error)
+    /// The client refused the call itself, with a text that is not a server reply. Reserved for the
+    /// rpc pool, and never a server reply code.
+    case clientRejected(code: UInt32, message: String)
     case configurationError(message: String)
 }
 
@@ -80,7 +90,8 @@ public struct CentrifugeClientConfig {
         tokenGetter: CentrifugeConnectionTokenGetter? = nil,
         logger: CentrifugeLogger? = nil,
         tlsChallengeHandler: CentrifugeTLSChallengeHandler? = nil,
-        instance: String? = nil
+        instance: String? = nil,
+        maxPendingRpc: Int = 32
     ) {
         self.timeout = timeout
         self.headers = headers
@@ -100,6 +111,7 @@ public struct CentrifugeClientConfig {
         self.logger = logger
         self.tlsChallengeHandler = tlsChallengeHandler
         self.instance = instance
+        self.maxPendingRpc = maxPendingRpc
     }
 
     /// Timeout for server responses and for opening the connection (the WebSocket
@@ -189,6 +201,11 @@ public struct CentrifugeClientConfig {
     /// by `init`.
     public var instance: String?
 
+    /// Most calls of a client with an instance that may be in flight at once: waiting, sent, or
+    /// waiting for a resend. A call beyond it fails at once with `replyError(code: 16)`. Must be at
+    /// least 1. A client without an instance has no bound.
+    public var maxPendingRpc: Int
+
 }
 
 /// A typealias for a provider that returns a custom `URLSessionConfiguration`.
@@ -243,11 +260,15 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate(set) var config: CentrifugeClientConfig
     internal let scheduler: ClientScheduler
     internal let clock: ClientClock
+    internal let random: ClientRandom
     // Set when the configuration cannot be used (see Instance.swift): connect() reports it and
     // rpc() fails with it. Nil for a usable configuration.
     internal let configError: CentrifugeError?
     internal let serverTimeOffset: ServerTimeOffset = ServerTimeOffset()
     fileprivate var identity: ConnectionIdentity = ConnectionIdentity()
+    // The rpc calls: tracked and plain (RpcTracker.swift). Bound to this client at the end of
+    // each initializer.
+    internal let rpcTracker: RpcTracker = RpcTracker()
     
     //MARK -
     fileprivate(set) var internalState: CentrifugeClientState = .disconnected
@@ -315,9 +336,10 @@ public class CentrifugeClient: @unchecked Sendable {
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
         self.clock = SystemClientClock()
+        self.random = SystemClientRandom()
         self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: self.clock)
-        self.configError = instanceConfigurationError(config.instance)
-        
+        self.configError = clientConfigurationError(config)
+
         var request = URLRequest(url: URL(string: self.url)!)
         for (key, value) in self.config.headers {
             request.addValue(value, forHTTPHeaderField: key)
@@ -335,8 +357,9 @@ public class CentrifugeClient: @unchecked Sendable {
                 log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
             }
         }
+        self.rpcTracker.bind(client: self)
     }
-    
+
     /// Initialize client with the clock and scheduler seams (see Scheduler.swift). The public
     /// initializer above passes the production values; tests reach this one through
     /// `@testable import`. The body repeats the public one, because both initializers are
@@ -346,7 +369,8 @@ public class CentrifugeClient: @unchecked Sendable {
         config: CentrifugeClientConfig,
         delegate: CentrifugeClientDelegate?,
         clock: ClientClock,
-        schedulerFactory: ClientSchedulerFactory
+        schedulerFactory: ClientSchedulerFactory,
+        random: ClientRandom = SystemClientRandom()
     ) {
         self.url = endpoint
         self.config = config
@@ -359,8 +383,9 @@ public class CentrifugeClient: @unchecked Sendable {
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
         self.clock = clock
+        self.random = random
         self.scheduler = schedulerFactory(self.syncQueue, clock)
-        self.configError = instanceConfigurationError(config.instance)
+        self.configError = clientConfigurationError(config)
         var request = URLRequest(url: URL(string: endpoint)!)
         for (key, value) in config.headers {
             request.addValue(value, forHTTPHeaderField: key)
@@ -376,6 +401,7 @@ public class CentrifugeClient: @unchecked Sendable {
                 log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
             }
         }
+        self.rpcTracker.bind(client: self)
     }
 
     /**
@@ -566,27 +592,29 @@ public class CentrifugeClient: @unchecked Sendable {
      - parameter completion: Completion block
      */
     public func rpc(method: String, data: Data, completion: @escaping (Result<CentrifugeRpcResult, Error>)->()) {
+        self.rpc(method: method, data: data, options: CentrifugeRpcOptions(), completion: completion)
+    }
+
+    /**
+     Send RPC command with options. The returned handle cancels the call.
+     - parameter method: String
+     - parameter data: Data
+     - parameter options: Headers and the deadline of the call
+     - parameter completion: Completion block
+     */
+    @discardableResult
+    public func rpc(
+        method: String,
+        data: Data,
+        options: CentrifugeRpcOptions,
+        completion: @escaping (Result<CentrifugeRpcResult, Error>)->()
+    ) -> CentrifugeRpcCall {
+        let slot: RpcCallSlot = RpcCallSlot(queue: self.syncQueue, tracker: self.rpcTracker)
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
-            if let error: CentrifugeError = strongSelf.configError {
-                completion(.failure(error))
-                return
-            }
-            strongSelf.waitForConnect(completion: { [weak self] error in
-                guard let strongSelf = self else { return }
-                if let err = error {
-                    completion(.failure(err))
-                    return
-                }
-                strongSelf.sendRPC(method: method, data: data, completion: {result, error in
-                    if let err = error {
-                        completion(.failure(err))
-                        return
-                    }
-                    completion(.success(CentrifugeRpcResult(data: result!.data)))
-                })
-            })
+            strongSelf.rpcTracker.admit(method: method, data: data, options: options, completion: completion, slot: slot)
         }
+        return CentrifugeRpcCall(slot: slot)
     }
     
     public func presence(channel: String, completion: @escaping (Result<CentrifugePresenceResult, Error>)->()) {
@@ -676,6 +704,15 @@ internal extension CentrifugeClient {
     /// Runs `item` on syncQueue after `delay`, with the late-timer grace of timeouts.
     func scheduleTimeout(after delay: TimeInterval, _ item: DispatchWorkItem) {
         self.scheduler.schedule(after: delay, lateGrace: true, item)
+    }
+
+    /// Gives a command the next command id and writes it on the connection. The tracker routes the
+    /// reply by that id. Throws when the command cannot be encoded: nothing is written then.
+    func writeTrackedCommand(_ command: inout Centrifugal_Centrifuge_Protocol_Command) throws -> UInt32 {
+        command.id = self.nextCommandId()
+        let data: Data = try CentrifugeSerializer.serializeCommands(commands: [command])
+        self.conn?.write(data: data)
+        return command.id
     }
 
     /// Whether the client is still connected over the transport with this id.
@@ -999,6 +1036,7 @@ fileprivate extension CentrifugeClient {
         
         if let result = res {
             self.state = .connected
+            self.rpcTracker.onConnected(capable: (result.flag & ConnectFlags.rpcOptions) != 0)
             self.reconnectAttempts = 0
             self.client = result.client
             self.identity.applyConnect(user: result.user, authClass: result.authClass)
@@ -1306,6 +1344,9 @@ fileprivate extension CentrifugeClient {
                     if let callback: ((CentrifugeResolveData) -> ()) = self.opCallbacks[reply.id] {
                         self.serverTimeFrom(reply: reply)
                         callback(CentrifugeResolveData(error: nil, reply: reply))
+                    } else if self.rpcTracker.owns(commandId: reply.id) {
+                        self.serverTimeFrom(reply: reply)
+                        self.rpcTracker.handleReply(reply)
                     }
                 } else {
                     if !reply.hasPush {
@@ -1420,7 +1461,8 @@ fileprivate extension CentrifugeClient {
             self.state = .disconnected
         }
         let needEvent = previousState != self.state
-        
+        self.rpcTracker.onTransportLost(terminal: !reconnect)
+
         self.client = nil
 
         // Channel compaction IDs are scoped to a server session — drop the routing
@@ -1759,32 +1801,6 @@ fileprivate extension CentrifugeClient {
                 let result = rep.presenceStats
                 let stats = CentrifugePresenceStatsResult(numClients: result.numClients, numUsers: result.numUsers)
                 completion(.success(stats))
-            }
-        })
-    }
-    
-    private func sendRPC(method: String, data: Data, completion: @escaping (Centrifugal_Centrifuge_Protocol_RPCResult?, Error?)->()) {
-        var req = Centrifugal_Centrifuge_Protocol_RPCRequest()
-        req.data = data
-        req.method = method
-        
-        var command = Centrifugal_Centrifuge_Protocol_Command()
-        command.id = self.nextCommandId()
-        command.rpc = req
-        
-        self.sendCommand(command: command, completion: { [weak self] reply, error in
-            guard self != nil else { return }
-            if let err = error {
-                completion(nil, err)
-                return
-            }
-            if let rep = reply {
-                if rep.hasError {
-                    completion(nil, CentrifugeError.replyError(code: rep.error.code, message: rep.error.message, temporary: rep.error.temporary))
-                    return
-                }
-                let result = rep.rpc
-                completion(result, nil)
             }
         })
     }
