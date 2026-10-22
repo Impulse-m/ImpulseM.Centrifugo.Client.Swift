@@ -22,33 +22,33 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
     }
 
 
-    @Test func sameSecondIncrements() {
+    @Test func sameSecondIncrements() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        let first: UInt64 = generator.next(serverTimeMillis: 100_000)
-        let second: UInt64 = generator.next(serverTimeMillis: 100_500)
+        let first: UInt64 = try generator.next(serverTimeMillis: 100_000)
+        let second: UInt64 = try generator.next(serverTimeMillis: 100_500)
         #expect(second - first == 1)
         #expect(timePart(first) == 100)
         #expect(sequencePart(first) == 7)
     }
 
 
-    @Test func laterSecondRestartsAtTheLane() {
+    @Test func laterSecondRestartsAtTheLane() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        _ = generator.next(serverTimeMillis: 100_000)
-        _ = generator.next(serverTimeMillis: 100_900)
-        let later: UInt64 = generator.next(serverTimeMillis: 101_000)
+        _ = try generator.next(serverTimeMillis: 100_000)
+        _ = try generator.next(serverTimeMillis: 100_900)
+        let later: UInt64 = try generator.next(serverTimeMillis: 101_000)
         #expect(timePart(later) == 101)
         #expect(sequencePart(later) == 7)
     }
 
 
-    @Test func backwardCorrectionHoldsTheTimePartAndKeepsIncreasing() {
+    @Test func backwardCorrectionHoldsTheTimePartAndKeepsIncreasing() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        let before: UInt64 = generator.next(serverTimeMillis: 100_000)
-        let behind: UInt64 = generator.next(serverTimeMillis: 99_000)
+        let before: UInt64 = try generator.next(serverTimeMillis: 100_000)
+        let behind: UInt64 = try generator.next(serverTimeMillis: 99_000)
         #expect(timePart(behind) == 100)
         #expect(behind > before)
     }
@@ -63,7 +63,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         var inSecond: UInt64 = 0
         var moved: UInt64? = nil
         for _ in 0 ..< bound {
-            let id: UInt64 = generator.next(serverTimeMillis: 100_000)
+            let id: UInt64 = try generator.next(serverTimeMillis: 100_000)
             if timePart(id) != 100 {
                 moved = id
                 break
@@ -77,37 +77,37 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
     }
 
 
-    @Test func resyncLowersTheTimePartAndChangesTheLane() {
+    @Test func resyncLowersTheTimePartAndChangesTheLane() throws {
         let random: ManualRandom = ManualRandom(lanes: [7, 300_000])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        _ = generator.next(serverTimeMillis: 100_000)
+        _ = try generator.next(serverTimeMillis: 100_000)
         generator.resync(serverTimeMillis: 50_000)
-        let after: UInt64 = generator.next(serverTimeMillis: 50_000)
+        let after: UInt64 = try generator.next(serverTimeMillis: 50_000)
         #expect(timePart(after) == 50)
         #expect(sequencePart(after) == 300_000)
         #expect(random.requestedRanges.count == 2, "a new second draws a new lane")
     }
 
 
-    @Test func resyncToTheSameSecondContinuesTheSequence() {
+    @Test func resyncToTheSameSecondContinuesTheSequence() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        _ = generator.next(serverTimeMillis: 100_000)
-        _ = generator.next(serverTimeMillis: 100_000)
+        _ = try generator.next(serverTimeMillis: 100_000)
+        _ = try generator.next(serverTimeMillis: 100_000)
         generator.resync(serverTimeMillis: 100_500)
-        let third: UInt64 = generator.next(serverTimeMillis: 100_000)
+        let third: UInt64 = try generator.next(serverTimeMillis: 100_000)
         #expect(sequencePart(third) == 9)
         #expect(random.requestedRanges.count == 1, "the same second draws no lane")
     }
 
 
     /// The first id takes the second of `now`, the start time, not the time of the first call.
-    /// A backward correction between the two keeps that second (JS and Java take the second of
-    /// the first call; the difference is recorded in the MsgIdGenerator doc comment).
-    @Test func firstIdKeepsTheSecondOfTheStartTime() {
+    /// A backward correction between the two keeps that second (table T3; JS and Java take the
+    /// second of the first call, the difference is recorded in the MsgIdGenerator type comment).
+    @Test func firstIdKeepsTheSecondOfTheStartTime() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        let first: UInt64 = generator.next(serverTimeMillis: 99_000)
+        let first: UInt64 = try generator.next(serverTimeMillis: 99_000)
         #expect(timePart(first) == 100)
         #expect(sequencePart(first) == 7)
     }
@@ -115,13 +115,13 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
 
     // Two generators with the production random source, started in the same second. A lane
     // is drawn from 2^19 values, so the 20 pairs are all equal only if the source is ignored.
-    @Test func twoDefaultGeneratorsInTheSameSecondGiveDifferentFirstIds() {
+    @Test func twoDefaultGeneratorsInTheSameSecondGiveDifferentFirstIds() throws {
         var equalPairs: Int = 0
         for _ in 0 ..< 20 {
             var first: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: SystemClientRandom())
             var second: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: SystemClientRandom())
-            let firstId: UInt64 = first.next(serverTimeMillis: 100_000)
-            let secondId: UInt64 = second.next(serverTimeMillis: 100_000)
+            let firstId: UInt64 = try first.next(serverTimeMillis: 100_000)
+            let secondId: UInt64 = try second.next(serverTimeMillis: 100_000)
             if firstId == secondId {
                 equalPairs += 1
             }
@@ -130,32 +130,61 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
     }
 
 
-    @Test func largestTimePartFitsFiftyThreeBits() {
+    @Test func largestTimePartFitsFiftyThreeBits() throws {
         let random: ManualRandom = ManualRandom()
         var generator: MsgIdGenerator = MsgIdGenerator(now: 0, random: random)
-        let id: UInt64 = generator.next(serverTimeMillis: Int64(secondsMask) * 1000)
+        let id: UInt64 = try generator.next(serverTimeMillis: Int64(secondsMask) * 1000)
         #expect(timePart(id) == secondsMask)
         #expect(id < UInt64(1) << 53)
     }
 
 
-    @Test func timePartBeyondThirtyThreeBitsIsClamped() {
+    @Test func timePartBeyondThirtyThreeBitsIsClamped() throws {
         let random: ManualRandom = ManualRandom()
         var generator: MsgIdGenerator = MsgIdGenerator(now: 0, random: random)
-        let id: UInt64 = generator.next(serverTimeMillis: Int64.max)
+        let id: UInt64 = try generator.next(serverTimeMillis: Int64.max)
         #expect(timePart(id) == secondsMask)
     }
 
 
+    /// The largest second holds 2^20 ids from its lane on. Lane 0 makes the ids of the largest
+    /// second run from 0 to 2^20 - 1; the next call refuses with `configurationError`.
+    @Test func generatorRefusesWhenTheLargestSecondIsExhausted() throws {
+        let random: ManualRandom = ManualRandom(lanes: [lowerLane])
+        let largestMillis: Int64 = Int64(secondsMask) * 1000
+        var generator: MsgIdGenerator = MsgIdGenerator(now: largestMillis, random: random)
+        var lastId: UInt64 = 0
+        for _ in 0 ..< MsgIdGenerator.sequenceLimit {
+            lastId = try generator.next(serverTimeMillis: largestMillis)
+        }
+        #expect(timePart(lastId) == secondsMask)
+        #expect(sequencePart(lastId) == MsgIdGenerator.sequenceLimit - 1)
+
+        var refusal: CentrifugeError? = nil
+        do {
+            _ = try generator.next(serverTimeMillis: largestMillis)
+        } catch let error as CentrifugeError {
+            refusal = error
+        }
+        guard case .configurationError(let message)? = refusal else {
+            Issue.record("the id after 2^20 in the largest second is refused with configurationError")
+            return
+        }
+        #expect(message == "msg_id space exhausted")
+    }
+
+
     // The range [0, 2^19) holds 2^19 values, 19 bits; the name is the spec's canonical row name.
-    @Test func laneIsDrawnFromTheNineteenBitsRange() {
+    @Test func laneIsDrawnFromTheNineteenBitsRange() throws {
         let low: ManualRandom = ManualRandom(lanes: [lowerLane])
         var lowGenerator: MsgIdGenerator = MsgIdGenerator(now: 0, random: low)
-        #expect(sequencePart(lowGenerator.next(serverTimeMillis: 0)) == lowerLane)
+        let lowId: UInt64 = try lowGenerator.next(serverTimeMillis: 0)
+        #expect(sequencePart(lowId) == lowerLane)
 
         let high: ManualRandom = ManualRandom(lanes: [laneTop])
         var highGenerator: MsgIdGenerator = MsgIdGenerator(now: 0, random: high)
-        #expect(sequencePart(highGenerator.next(serverTimeMillis: 0)) == laneTop)
+        let highId: UInt64 = try highGenerator.next(serverTimeMillis: 0)
+        #expect(sequencePart(highId) == laneTop)
 
         #expect(low.requestedRanges == [0 ... laneTop], "the lane range is [0, 2^19)")
         #expect(high.requestedRanges == [0 ... laneTop], "the lane range is [0, 2^19)")

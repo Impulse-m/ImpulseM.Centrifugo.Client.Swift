@@ -132,7 +132,7 @@ final class SchedulerSeamTests: @unchecked Sendable {
                 receivedClock.set(factoryClock)
                 let manual: ManualScheduler = ManualScheduler(
                     queue: queue,
-                    clock: factoryClock as? ManualClock ?? ManualClock()
+                    clock: factoryClock as! ManualClock
                 )
                 holder.set(manual)
                 return manual
@@ -167,7 +167,7 @@ final class SchedulerSeamTests: @unchecked Sendable {
             schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
                 let manual: ManualScheduler = ManualScheduler(
                     queue: queue,
-                    clock: factoryClock as? ManualClock ?? ManualClock()
+                    clock: factoryClock as! ManualClock
                 )
                 holder.set(manual)
                 return manual

@@ -7,8 +7,13 @@ import Foundation
 /// part to the second the server refused the id in, and takes a fresh lane when that
 /// second is new.
 ///
-/// While the time part is below its maximum, every id is below 2^53, so it is exact as a
-/// JavaScript number. The largest second is the exception (see `next`).
+/// The first id of a generator (table T3 of the parity spec) takes the second of the start
+/// time it was created with, even when a backward correction moved the server time before
+/// that second. The second of the first call is not used. JS and Java take the second of
+/// the first call instead; the difference only shows for such a correction.
+///
+/// Every id is below 2^53, so it is exact as a JavaScript number. In the largest second
+/// the generator refuses the id after 2^20 ids (see `next`).
 ///
 /// A pure value type: the start time and the random source are parameters, so the
 /// generator runs without a client.
@@ -38,9 +43,7 @@ internal struct MsgIdGenerator {
 
     /// - Parameters:
     ///   - now: the corrected server time in milliseconds when the generator starts. The
-    ///     first id takes the time part of `now`, not the time of the first call: a backward
-    ///     correction between the two keeps the second of `now`. JS and Java take the second
-    ///     of the first call instead; the difference only shows for such a correction.
+    ///     first id takes the time part of `now` (see the type comment, table T3).
     ///   - random: draws the lanes.
     internal init(now: Int64, random: ClientRandom) {
         self.random = random
@@ -55,17 +58,20 @@ internal struct MsgIdGenerator {
     /// The time part never moves back on its own: an earlier server time keeps the last
     /// time part, and the sequence goes on.
     ///
-    /// At the largest time part the sequence keeps counting instead of wrapping, so no
-    /// msg_id repeats. Past 2^20 ids in that second an id no longer fits in 53 bits, so it
-    /// is not exact as a JavaScript number. Reaching that takes over a million ids in one
-    /// second, and it is not refused here.
-    internal mutating func next(serverTimeMillis: Int64) -> UInt64 {
+    /// At the largest time part the generator has 2^20 ids. Once they are issued, the next
+    /// call throws `configurationError` ("msg_id space exhausted") and changes nothing, as
+    /// the JS (RangeError) and Java (IllegalStateException) generators refuse. The caller
+    /// completes the call that needed the id with that error.
+    internal mutating func next(serverTimeMillis: Int64) throws -> UInt64 {
         var seconds: UInt64 = max(MsgIdGenerator.clampSeconds(serverTimeMillis), self.lastSeconds)
         var seq: UInt64 = self.lane
         if seconds == self.lastSeconds {
             seq = self.nextSeq
         }
-        if seq >= MsgIdGenerator.sequenceLimit && seconds < MsgIdGenerator.maxSeconds {
+        if seq >= MsgIdGenerator.sequenceLimit {
+            if seconds >= MsgIdGenerator.maxSeconds {
+                throw CentrifugeError.configurationError(message: "msg_id space exhausted")
+            }
             seconds += 1
             seq = self.lane
         }
