@@ -173,7 +173,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
     // MARK: tracked calls
 
-    @Test func repliesAreAckedWithTheNextCall() async {
+    @Test func repliesAreAckedWithTheNextCall() async throws {
         let harness: Harness = await connectedHarness()
         let first: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         await fulfillment(of: first.outcome.done, within: 5)
@@ -181,13 +181,13 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: second.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 2)
+        try #require(sent.count == 2)
         #expect(sent[0].rpc.ack.isEmpty, "nothing was acked before the first call")
         #expect(sent[1].rpc.ack == [sent[0].rpc.msgID], "the next command carries the ack of the first reply")
     }
 
 
-    @Test func droppedCallRunsOnceAndTheResendGetsTheSameReply() async {
+    @Test func droppedCallRunsOnceAndTheResendGetsTheSameReply() async throws {
         let harness: Harness = await connectedHarness()
         let dropping: LockedBox<Bool> = LockedBox(true)
         fake.setDrop { (command: RpcCommand) -> Bool in
@@ -203,7 +203,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 2)
+        try #require(sent.count == 2)
         #expect(sent[0].rpc.msgID == sent[1].rpc.msgID, "the resend keeps the msg_id")
         #expect(sent[1].rpc.retransmit, "the resend is marked as a retransmit")
         #expect(sent[0].id != sent[1].id, "the resend takes a fresh command id")
@@ -211,7 +211,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func lostCallsAreSentAgainInMsgIdOrder() async {
+    @Test func lostCallsAreSentAgainInMsgIdOrder() async throws {
         let harness: Harness = await connectedHarness()
         let dropping: LockedBox<Bool> = LockedBox(true)
         fake.setDrop { (command: RpcCommand) -> Bool in
@@ -229,7 +229,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: second.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 4)
+        try #require(sent.count == 4)
         let resent: [RpcCommand] = Array(sent.suffix(2))
         #expect(resent[0].rpc.msgID < resent[1].rpc.msgID, "the resends go out in msg_id order")
         #expect(resent.allSatisfy { (command: RpcCommand) -> Bool in command.rpc.retransmit })
@@ -237,7 +237,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func aCallDroppedFromTheBatchBeforeItsWriteIsSentAsAFirstSend() async {
+    @Test func aCallDroppedFromTheBatchBeforeItsWriteIsSentAsAFirstSend() async throws {
         let harness: Harness = await connectedHarness()
         await dropConnection(harness)
         // The call is admitted while the client waits for its connection: it is not written yet.
@@ -248,7 +248,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 1)
+        try #require(sent.count == 1)
         #expect(!sent[0].rpc.retransmit, "a call that was never written is a first send")
         #expect(sent[0].rpc.msgID != 0)
         #expect(succeeded(call.outcome.result))
@@ -522,7 +522,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func aRefusalWithTheNewMsgIdSignalIsSentAgainWithANewId() async {
+    @Test func aRefusalWithTheNewMsgIdSignalIsSentAgainWithANewId() async throws {
         let harness: Harness = await connectedHarness()
         let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueNewMsgID]
         let serverTime: Int64 = harness.clock.wallMillis() + 5_000
@@ -535,7 +535,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 2)
+        try #require(sent.count == 2)
         #expect(sent[1].rpc.msgID >> 20 > sent[0].rpc.msgID >> 20, "the resend has the corrected, later time part")
         #expect(sent[1].rpc.msgID != sent[0].rpc.msgID)
         #expect(!sent[1].rpc.retransmit, "a new msg_id is a first send")
@@ -563,7 +563,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
     /// The resend is armed at the drawn delay (the ceiling, 250 ms, with the draw at 1); the test
     /// advances the clock past it and the same msg_id goes out again.
-    @Test func aRefusalWithTheLaterSignalIsSentAgainWithTheSameMsgIdAfterItsDelay() async {
+    @Test func aRefusalWithTheLaterSignalIsSentAgainWithTheSameMsgIdAfterItsDelay() async throws {
         let harness: Harness = await connectedHarness(random: ManualRandom(draw: 1))
         let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueLater]
         refuseFirst(1) { () -> RpcReply in
@@ -582,7 +582,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 2)
+        try #require(sent.count == 2)
         #expect(sent[1].rpc.msgID == sent[0].rpc.msgID, "a later resend keeps the msg_id")
         #expect(sent[1].rpc.retransmit)
         #expect(sent[1].id != sent[0].id)
@@ -661,7 +661,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func aResendCrossingALostConnectionGoesOutWithTheReconnect() async {
+    @Test func aResendCrossingALostConnectionGoesOutWithTheReconnect() async throws {
         let harness: Harness = await connectedHarness(random: ManualRandom(draw: 1))
         let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueLater]
         refuseFirst(1) { () -> RpcReply in
@@ -681,7 +681,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        #expect(sent.count == 2)
+        try #require(sent.count == 2)
         #expect(sent[1].rpc.msgID == sent[0].rpc.msgID)
         #expect(sent[1].rpc.retransmit)
         #expect(succeeded(call.outcome.result))

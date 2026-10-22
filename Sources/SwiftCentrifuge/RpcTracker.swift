@@ -392,9 +392,8 @@ internal final class RpcTracker {
             }
             let now: UInt64 = self.client.clock.monotonicNanos()
             guard call.deadline > now else {
-                // The deadline is already reached: the server's error is the answer, and no
-                // attempt can run before the deadline.
-                self.settle(call, .failure(rpcErrorValue(error)))
+                // The deadline is already reached: no attempt can run before it (F8).
+                self.settle(call, .failure(CentrifugeError.timeout))
                 return
             }
             let remaining: UInt64 = call.deadline - now
