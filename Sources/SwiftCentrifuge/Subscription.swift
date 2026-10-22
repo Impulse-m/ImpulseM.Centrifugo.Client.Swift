@@ -442,7 +442,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
                     }
                 }
             }
-            strongSelf.centrifuge?.syncQueue.asyncAfter(deadline: .now() + delay, execute: strongSelf.resubscribeTask!)
+            strongSelf.centrifuge?.scheduleAfter(delay, strongSelf.resubscribeTask!)
         }
     }
     
@@ -507,7 +507,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
             }
         }
         
-        self.centrifuge?.syncQueue.asyncAfter(deadline: .now() + Double(ttl), execute: refreshTask)
+        self.centrifuge?.scheduleAfter(Double(ttl), refreshTask)
         self.refreshTask = refreshTask
     }
     

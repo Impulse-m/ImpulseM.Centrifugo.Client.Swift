@@ -232,6 +232,9 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate(set) var url: String
     fileprivate(set) var syncQueue: DispatchQueue
     fileprivate(set) var config: CentrifugeClientConfig
+    internal let clock: ClientClock
+    internal let random: ClientRandom
+    internal let scheduler: ClientScheduler
     
     //MARK -
     fileprivate(set) var internalState: CentrifugeClientState = .disconnected
@@ -245,7 +248,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var client: String?
     fileprivate var token: String?
     fileprivate var data: Data?
-    fileprivate var commandId: UInt32 = 0
+    fileprivate var commandIds: CommandIdCounter = CommandIdCounter()
     fileprivate var commandIdLock: NSLock = NSLock()
     fileprivate var opCallbacks: [UInt32: ((CentrifugeResolveData) -> ())] = [:]
     fileprivate var connectCallbacks: [String: ((Error?) -> ())] = [:]
@@ -284,7 +287,28 @@ public class CentrifugeClient: @unchecked Sendable {
     ///   - url: protobuf URL endpoint of Centrifugo/Centrifuge.
     ///   - config: config object.
     ///   - delegate: delegate protocol implementation to react on client events.
-    public init(endpoint: String, config: CentrifugeClientConfig, delegate: CentrifugeClientDelegate? = nil) {
+    public convenience init(endpoint: String, config: CentrifugeClientConfig, delegate: CentrifugeClientDelegate? = nil) {
+        self.init(
+            endpoint: endpoint,
+            config: config,
+            delegate: delegate,
+            clock: SystemClientClock(),
+            random: SystemClientRandom(),
+            schedulerFactory: { (queue: DispatchQueue, clock: ClientClock) -> ClientScheduler in
+                return DispatchClientScheduler(queue: queue, clock: clock)
+            }
+        )
+    }
+
+    /// Initialize client with the clock, random and scheduler seams (see Scheduler.swift).
+    internal init(
+        endpoint: String,
+        config: CentrifugeClientConfig,
+        delegate: CentrifugeClientDelegate?,
+        clock: ClientClock,
+        random: ClientRandom,
+        schedulerFactory: ClientSchedulerFactory
+    ) {
         self.url = endpoint
         self.config = config
         self.delegate = delegate
@@ -298,6 +322,9 @@ public class CentrifugeClient: @unchecked Sendable {
         
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+        self.clock = clock
+        self.random = random
+        self.scheduler = schedulerFactory(self.syncQueue, clock)
         
         var request = URLRequest(url: URL(string: self.url)!)
         for (key, value) in self.config.headers {
@@ -608,17 +635,7 @@ internal extension CentrifugeClient {
     /// meanwhile may still be waiting in the socket, so the item runs after a short
     /// grace period instead, letting them be handled first.
     func scheduleTimeout(after delay: TimeInterval, _ item: DispatchWorkItem) {
-        let deadline = DispatchTime.now() + delay
-        self.syncQueue.asyncAfter(deadline: deadline) { [weak self] in
-            guard let strongSelf = self, !item.isCancelled else { return }
-            let now = DispatchTime.now().uptimeNanoseconds
-            let late = now > deadline.uptimeNanoseconds ? Double(now - deadline.uptimeNanoseconds) / 1e9 : 0
-            if late > lateTimerGrace {
-                strongSelf.syncQueue.asyncAfter(deadline: .now() + lateTimerGrace, execute: item)
-            } else {
-                item.perform()
-            }
-        }
+        self.scheduler.schedule(after: delay, item)
     }
 
     /// Whether the client is still connected over the transport with this id.
@@ -1001,8 +1018,7 @@ fileprivate extension CentrifugeClient {
     
     private func nextCommandId() -> UInt32 {
         self.commandIdLock.lock()
-        self.commandId += 1
-        let cid = self.commandId
+        let cid = self.commandIds.next()
         self.commandIdLock.unlock()
         return cid
     }
@@ -1095,7 +1111,7 @@ fileprivate extension CentrifugeClient {
             strongSelf.startAttempt()
         }
         self.log.debug("schedule reconnect in \(delay) seconds")
-        self.syncQueue.asyncAfter(deadline: .now() + delay, execute: self.reconnectTask!)
+        self.scheduleAfter(delay, self.reconnectTask!)
     }
     
     // The client-side subscription a push is for: only a subscribed one. A push for
@@ -1326,7 +1342,7 @@ fileprivate extension CentrifugeClient {
             })
         }
         
-        self.syncQueue.asyncAfter(deadline: .now() + Double(ttl), execute: refreshTask)
+        self.scheduleAfter(Double(ttl), refreshTask)
         self.refreshTask = refreshTask
     }
     
