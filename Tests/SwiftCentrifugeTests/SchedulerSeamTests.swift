@@ -136,7 +136,8 @@ final class SchedulerSeamTests: @unchecked Sendable {
                 )
                 holder.set(manual)
                 return manual
-            }
+            },
+            random: SystemClientRandom()
         )
         client.connect()
         await awaitSyncQueue(client)

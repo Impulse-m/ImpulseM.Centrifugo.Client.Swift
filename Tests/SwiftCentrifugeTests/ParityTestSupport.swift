@@ -80,7 +80,7 @@ func makeManualClient(
     endpoint: String,
     config: CentrifugeClientConfig,
     delegate: CentrifugeClientDelegate? = nil,
-    random: ClientRandom = SystemClientRandom()
+    random: ClientRandom? = nil
 ) -> ManualClientSetup {
     let clock: ManualClock = ManualClock()
     let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
@@ -98,7 +98,7 @@ func makeManualClient(
             holder.set(manual)
             return manual
         },
-        random: random
+        random: random ?? SystemClientRandom()
     )
     // The factory runs inside the client's initializer, so the holder is always filled by now.
     let scheduler: ManualScheduler = holder.current!

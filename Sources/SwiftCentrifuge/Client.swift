@@ -370,7 +370,7 @@ public class CentrifugeClient: @unchecked Sendable {
         delegate: CentrifugeClientDelegate?,
         clock: ClientClock,
         schedulerFactory: ClientSchedulerFactory,
-        random: ClientRandom = SystemClientRandom()
+        random: ClientRandom
     ) {
         self.url = endpoint
         self.config = config
