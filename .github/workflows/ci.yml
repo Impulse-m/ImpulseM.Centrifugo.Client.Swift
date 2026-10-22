@@ -50,28 +50,6 @@ jobs:
           echo "Centrifugo did not start in time"
           cat centrifugo.log || true
           exit 1
-      # DIAGNOSTIC (temporary, revert in a separate commit): full frontend output for three files.
-      - name: Diagnose three test files
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          swift build
-          MODDIR=$(dirname "$(find .build -name SwiftCentrifuge.swiftmodule -maxdepth 6 | head -1)")
-          echo "module dir: $MODDIR"
-          SDK=$(xcrun --show-sdk-path)
-          FLAGS="-target arm64-apple-macos14.0 -sdk $SDK -module-name SwiftCentrifugeTests -enable-testing -I $MODDIR -I .build/arm64-apple-macosx/debug/Modules -F $(xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks -F $(xcode-select -p)/Library/Developer/Frameworks"
-          for name in CallWaitTests FilterTests RpcTrackerTests; do
-            f="Tests/SwiftCentrifugeTests/$name.swift"
-            OTHERS=$(ls Tests/SwiftCentrifugeTests/*.swift | grep -v -F "$f")
-            xcrun swiftc -frontend -typecheck -primary-file "$f" $OTHERS $FLAGS -warn-long-expression-type-checking=200 -warn-long-function-bodies=200 > frontend.out 2>&1
-            RC=$?
-            echo "=================== $name exit $RC"
-            echo "--- While lines:"
-            grep -n "While " frontend.out | head -40
-            echo "--- full output up to Stack dump plus 30 lines:"
-            awk '/Stack dump:/{f=1} {print} f&&++n>=31{exit}' frontend.out | head -400
-          done
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
