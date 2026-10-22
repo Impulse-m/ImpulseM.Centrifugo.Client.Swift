@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 @testable import SwiftCentrifuge
 
 // The server side of the tracked-call tests. It composes the
