@@ -82,10 +82,7 @@ final class FakeRpcServer: @unchecked Sendable {
     func awaitArrivals(_ description: String, count: Int = 1, _ matches: @escaping (RpcCommand) -> Bool) async {
         let expectation: Expectation = Expectation(description)
         expectation.expectedFulfillmentCount = count
-        lock.lock()
-        let alreadyArrived: Int = self.arrivals.filter(matches).count
-        self.waiters.append(Waiter(matches: matches, expectation: expectation))
-        lock.unlock()
+        let alreadyArrived: Int = registerWaiter(Waiter(matches: matches, expectation: expectation))
         for _ in 0 ..< min(alreadyArrived, count) {
             expectation.fulfill()
         }
@@ -99,6 +96,19 @@ final class FakeRpcServer: @unchecked Sendable {
             lock.unlock()
         }
         return self.answerRule
+    }
+
+
+    /// Adds a waiter and returns how many matching commands arrived before it. Kept synchronous so the
+    /// lock is never taken from an async context, where NSLock is unavailable.
+    private func registerWaiter(_ waiter: Waiter) -> Int {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        let alreadyArrived: Int = self.arrivals.filter(waiter.matches).count
+        self.waiters.append(waiter)
+        return alreadyArrived
     }
 
 
@@ -196,16 +206,25 @@ final class RpcTestDelegate: CentrifugeClientDelegate, @unchecked Sendable {
 
     private func awaitEvent(_ event: Event, times: Int) async {
         let expectation: Expectation = Expectation("delegate event")
-        var satisfied: Bool = false
-        lock.lock()
-        satisfied = (self.counts[event] ?? 0) >= times
-        if !satisfied {
-            self.waiters.append(Waiter(event: event, target: times, expectation: expectation))
-        }
-        lock.unlock()
+        let satisfied: Bool = registerEventWaiter(event, times: times, expectation: expectation)
         if satisfied {
             return
         }
         await fulfillment(of: expectation, within: 5)
+    }
+
+
+    /// Adds a waiter unless the count is already reached, and tells whether it is. Synchronous for the
+    /// same reason as `FakeRpcServer.registerWaiter`.
+    private func registerEventWaiter(_ event: Event, times: Int, expectation: Expectation) -> Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        if (self.counts[event] ?? 0) >= times {
+            return true
+        }
+        self.waiters.append(Waiter(event: event, target: times, expectation: expectation))
+        return false
     }
 }
