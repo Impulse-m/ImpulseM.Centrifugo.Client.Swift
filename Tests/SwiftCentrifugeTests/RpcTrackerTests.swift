@@ -704,22 +704,40 @@ final class RpcTrackerTests: @unchecked Sendable {
     @Test func theDeadlineDuringTheDelayRejectsWithTimeoutAndSendsACancel() async {
         let harness: Harness = await connectedHarness(random: ManualRandom(draw: 1))
         let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueLater]
+        // The server never answers the call itself: the test sends its refusal, so the refusal is
+        // handled at a known point. The barrier call is answered, and its reply follows the refusal
+        // on the connection, so once the barrier completes the refusal has been handled.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.method == "method"
+        }
         fake.setAnswer { (command: RpcCommand) -> RpcReply? in
-            guard command.hasRpc, command.rpc.cancel == 0 else {
+            guard command.hasRpc, command.rpc.cancel == 0, command.rpc.method == "barrier" else {
                 return nil
             }
-            return self.errorReply(code: 100, metadata: metadata)
-        }
-        let armed: Expectation = Expectation("resend armed at the deadline")
-        harness.scheduler.observe { (scheduled: ScheduledCall) in
-            if abs(scheduled.delay - 0.2) < 0.000_001 {
-                armed.fulfill()
-            }
+            return self.successReply()
         }
         let options: CentrifugeRpcOptions = CentrifugeRpcOptions(timeout: 0.2)
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client, options: options)
-        await fulfillment(of: armed, within: 5)
-        await drain(harness)
+        await fake.awaitArrivals("rpc arrived") { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0 && command.rpc.method == "method"
+        }
+        let msgID: UInt64 = callCommands().first { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }?.rpc.msgID ?? 0
+
+        let originalId: UInt32 = callCommands().first { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }?.id ?? 0
+        var refusal: RpcReply = errorReply(code: 100, metadata: metadata)
+        refusal.id = originalId
+        fake.server.sendReply(refusal)
+
+        let barrier: CallOutcome = CallOutcome()
+        harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
+            barrier.record(result)
+        }
+        await fulfillment(of: barrier.done, within: 5)
+
         await harness.scheduler.advance(by: 0.2)
         await fulfillment(of: call.outcome.done, within: 5)
 
@@ -727,11 +745,11 @@ final class RpcTrackerTests: @unchecked Sendable {
         } else {
             Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
-        let msgID: UInt64 = callCommands().first?.rpc.msgID ?? 0
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
-            return command.hasRpc && command.rpc.cancel == msgID
+            return command.hasRpc && command.rpc.cancel != 0
         }
         #expect(cancelCommands().count == 1)
+        #expect(cancelCommands().first?.rpc.cancel == msgID)
     }
 
 
