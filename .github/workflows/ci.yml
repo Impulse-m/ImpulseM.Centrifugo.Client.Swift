@@ -53,18 +53,7 @@ jobs:
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
-        env:
-          SWIFT_BACKTRACE: enable=yes,interactive=no,color=no
         run: ./scripts/test.sh --verbose
-      - name: Show crash reports on failure
-        if: failure()
-        run: |
-          cd ~/Library/Logs/DiagnosticReports 2>/dev/null || exit 0
-          for f in $(ls -t | grep -E '\.(ips|crash)$' | head -5); do
-            echo "==> $f"
-            head -c 400000 "$f"
-            echo
-          done
       - name: Show Centrifugo log on failure
         if: failure()
         run: cat centrifugo.log || true
