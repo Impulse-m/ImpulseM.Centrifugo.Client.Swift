@@ -1345,7 +1345,9 @@ fileprivate extension CentrifugeClient {
                         self.serverTimeFrom(reply: reply)
                         callback(CentrifugeResolveData(error: nil, reply: reply))
                     } else if self.rpcTracker.owns(commandId: reply.id) {
-                        self.serverTimeFrom(reply: reply)
+                        if self.rpcTracker.awaitsReply(commandId: reply.id) {
+                            self.serverTimeFrom(reply: reply)
+                        }
                         self.rpcTracker.handleReply(reply)
                     }
                 } else {

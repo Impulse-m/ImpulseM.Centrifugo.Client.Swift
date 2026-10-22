@@ -125,6 +125,16 @@ internal final class RpcTracker {
     }
 
 
+    /// Whether a reply with this command id answers a command still waiting for its reply: a call
+    /// that has not settled, or a cancel. A late reply to a call that settled early does not.
+    internal func awaitsReply(commandId: UInt32) -> Bool {
+        guard let route: Route = self.routes[commandId] else {
+            return false
+        }
+        return route.call != nil || route.isCancel
+    }
+
+
     /// Admits a call. The completion runs once, on the client's queue. `slot` receives the call, so
     /// the handle can cancel it.
     internal func admit(
