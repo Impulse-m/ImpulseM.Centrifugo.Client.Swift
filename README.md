@@ -103,6 +103,7 @@ Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends th
 - A timer refresh that fails is retried with a fresh token when the server answers with a client error (code below 100), a temporary error, or code 109. The retry delay is 10 to 20 seconds at first and doubles with each consecutive failure, up to `CentrifugeClientConfig.tokenRetryCap` (default 300 seconds). The delay is drawn from 10 s plus a random part, as the Java SDK does. This changes the earlier fixed 5 to 10 second retry: the first retry now starts at 10 seconds.
 - A timer refresh refused with code 103 keeps the connection and its identity, and is not retried. Any other server error ends the connection with that code, without a reconnect.
 - With `CentrifugeClientConfig.stopOnRefusedToken` (default true), a retry that would send again the token the server refused as expired (109) is not sent. The connection is left to expire, and the next connect asks the token getter for a token. Set it to false to resend the same token.
+- A subscription token refresh follows the same rules, with its own failure count and its own retry delay: a failed refresh is reported through `onError` as `subscriptionRefreshError`. Code 103 keeps the subscription and is not retried, and any other error that is not retried unsubscribes with that code. This differs from earlier versions, which unsubscribed on code 109 and on any non-temporary error.
 
 ## Usage in background
 

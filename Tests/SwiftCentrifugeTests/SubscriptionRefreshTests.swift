@@ -91,8 +91,8 @@ final class SubscriptionRefreshTests: @unchecked Sendable {
 
         await fulfillment(of: subscribed, within: 5)
         await fulfillment(of: errored, within: 5)
-        // The retry is scheduled with backoff(step: 0, min: 5, max: 10) seconds.
-        await fulfillment(of: retried, within: 15)
+        // The first retry waits 10 to 20 seconds (the timer refresh backoff), so the wait allows 25.
+        await fulfillment(of: retried, within: 25)
         await fulfillment(of: unsubscribed, within: 0.5)
         #expect(sub.state == .subscribed)
     }
