@@ -772,6 +772,15 @@ final class RpcTrackerTests: @unchecked Sendable {
             }
             return self.successReply()
         }
+        // The observer is set before the call starts, so the arm of the call's deadline is seen too. The
+        // resend is due at that same moment (its delay is capped at the deadline), so the one timer is
+        // never re-armed for it: every arm of the call is at or before the deadline.
+        let armedDelays: LockedBox<[TimeInterval]> = LockedBox([])
+        harness.scheduler.observe { (scheduled: ScheduledCall) in
+            armedDelays.update { (delays: inout [TimeInterval]) in
+                delays.append(scheduled.delay)
+            }
+        }
         let options: CentrifugeRpcOptions = CentrifugeRpcOptions(timeout: 0.2)
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client, options: options)
         await fake.awaitArrivals("rpc arrived") { (command: RpcCommand) -> Bool in
@@ -780,14 +789,6 @@ final class RpcTrackerTests: @unchecked Sendable {
         let originalId: UInt32 = callCommands().first { (command: RpcCommand) -> Bool in
             return command.rpc.method == "method"
         }?.id ?? 0
-        // The timers armed from here on: the refusal arms the resend, and the barrier, which is
-        // answered after the refusal on the same connection, has been handled by then.
-        let armedDelays: LockedBox<[TimeInterval]> = LockedBox([])
-        harness.scheduler.observe { (scheduled: ScheduledCall) in
-            armedDelays.update { (delays: inout [TimeInterval]) in
-                delays.append(scheduled.delay)
-            }
-        }
         var refusal: RpcReply = errorReply(code: 100, metadata: metadata)
         refusal.id = originalId
         fake.server.sendReply(refusal)
@@ -801,10 +802,10 @@ final class RpcTrackerTests: @unchecked Sendable {
         let expectedRange: ClosedRange<UInt64> = 0 ... 200_000_000
         #expect(random.requestedRanges.last == expectedRange, "the later resend is drawn over the remaining 200 ms, not 250 ms")
         let delays: [TimeInterval] = armedDelays.current
-        let armedAtTheRemainingDeadline: Bool = delays.contains(where: { (delay: TimeInterval) -> Bool in
-            return abs(delay - 0.2) < 0.000_001
-        })
-        #expect(armedAtTheRemainingDeadline, "the resend is armed at the remaining deadline, 0.2 s")
+        let noArmBeyondTheDeadline: Bool = !delays.isEmpty && delays.allSatisfy { (delay: TimeInterval) -> Bool in
+            return delay <= 0.2 + 0.000_001
+        }
+        #expect(noArmBeyondTheDeadline, "no timer waits past the remaining deadline, 0.2 s")
 
         await harness.scheduler.advance(by: 0.2)
         await fulfillment(of: call.outcome.done, within: 5)
