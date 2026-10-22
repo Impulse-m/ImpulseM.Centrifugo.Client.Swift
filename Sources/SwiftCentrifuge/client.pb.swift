@@ -8,6 +8,32 @@
 // For information on using the generated types, please see the documentation:
 //   https://github.com/apple/swift-protobuf/
 
+// Client protocol of Centrifuge and Centrifugo.
+//
+// This file describes messages exchanged between a client SDK and a server
+// over a real-time transport. The same schema is used for both supported
+// encodings:
+//
+//   - Protobuf: messages are encoded as Protobuf, several messages in one
+//     frame are varint length-delimited.
+//   - JSON: messages are encoded as JSON objects using the field names below,
+//     several messages in one frame are separated by a new line. Fields of
+//     type bytes carry raw embedded JSON, not base64.
+//
+// Client sends Command messages, server sends Reply messages. On unidirectional
+// transports (where the client does not send commands over the connection)
+// server sends Push messages without a Reply wrapper.
+//
+// Compatibility: field numbers and names are part of the wire contract (names
+// matter for JSON). Never renumber, rename or change type of an existing field.
+// Removed fields must be added to reserved.
+//
+// Fork fields use numbers 1000-1999.
+//
+// oneof is intentionally not used anywhere in this file for JSON
+// interoperability: a message which semantically carries one of several
+// payloads has them as separate optional fields, exactly one of which is set.
+
 import Foundation
 import SwiftProtobuf
 
@@ -21,31 +47,82 @@ fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAP
   typealias Version = _2
 }
 
+/// Error is returned in Reply to a Command which could not be processed.
+///
+/// Codes in range [0, 399] are reserved by Centrifuge, applications use
+/// codes in range [400, 1999]. Built-in codes:
+///
+///   100 internal server error (temporary)
+///   101 unauthorized
+///   102 unknown channel
+///   103 permission denied
+///   104 method not found
+///   105 already subscribed
+///   106 limit exceeded
+///   107 bad request
+///   108 not available
+///   109 token expired
+///   110 expired
+///   111 too many requests (temporary)
+///   112 unrecoverable position
+///   113 concurrent pagination (temporary)
+///
+/// Note that many protocol violations result in a Disconnect instead of an
+/// Error reply.
 struct Centrifugal_Centrifuge_Protocol_Error: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Error code.
   var code: UInt32 = 0
 
+  /// Human readable error description. Clients must not rely on its content,
+  /// use code instead.
   var message: String = String()
 
+  /// When set the error condition is temporary and the same command may succeed
+  /// if retried later (preferably with a backoff).
   var temporary: Bool = false
+
+  /// Application error code passed through from the backend; 0 = none.
+  var appCode: Int32 = 0
+
+  /// Application error type passed through from the backend.
+  var appType: String = String()
+
+  /// Allow-listed backend metadata for the client.
+  var metadata: Dictionary<String,String> = [:]
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
 
+/// EmulationRequest is the body of an HTTP request a client sends to the
+/// emulation endpoint when it uses bidirectional emulation over a transport
+/// which can only stream data from server to client (HTTP-streaming, SSE).
+/// Server-to-client data flows over the stream, while client commands are
+/// delivered with EmulationRequest and routed to the node which holds the
+/// connection.
+///
+/// The request body is Protobuf when sent with Content-Type
+/// application/octet-stream, JSON otherwise. The server responds with HTTP
+/// 204 No Content on success - replies to commands arrive over the stream.
 struct Centrifugal_Centrifuge_Protocol_EmulationRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Id of the node serving the connection, from ConnectResult.node.
   var node: String = String()
 
+  /// Session of the connection, from ConnectResult.session.
   var session: String = String()
 
+  /// Encoded Command(s) in the connection protocol, may contain several
+  /// commands in the same format as a regular transport frame. For JSON this
+  /// is a JSON string containing the encoded commands, for Protobuf - raw bytes.
   var data: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -53,22 +130,26 @@ struct Centrifugal_Centrifuge_Protocol_EmulationRequest: Sendable {
   init() {}
 }
 
-/// Command sent from a client to a server.
+/// Command is sent from a client to a server.
 struct Centrifugal_Centrifuge_Protocol_Command: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Id of command to let client match replies to commands.
+  /// Id of the command, echoed back in Reply.id to let the client match replies
+  /// to commands. Must be > 0 for every command expecting a reply. Only a send
+  /// command, which never gets a reply, may have zero id.
+  ///
+  /// A command with zero id and no request set (empty Command) is a pong - the
+  /// response to a server ping, see ConnectResult.pong. A pong without a
+  /// preceding server ping results in a bad request disconnect.
   var id: UInt32 {
     get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
-  /// Client can send one of the following requests. Server will
-  /// only take the first non-null request out of these and may return an error if
-  /// client passed more than one request. We are not using oneof here due to JSON
-  /// interoperability concerns.
+  /// Connect must be the first command sent over a connection. Any other
+  /// command before a successful connect results in a disconnect.
   var connect: Centrifugal_Centrifuge_Protocol_ConnectRequest {
     get {_storage._connect ?? Centrifugal_Centrifuge_Protocol_ConnectRequest()}
     set {_uniqueStorage()._connect = newValue}
@@ -132,6 +213,7 @@ struct Centrifugal_Centrifuge_Protocol_Command: @unchecked Sendable {
   /// Clears the value of `history`. Subsequent reads from it will return its default value.
   mutating func clearHistory() {_uniqueStorage()._history = nil}
 
+  /// Not supported by the server at the moment, see PingRequest.
   var ping: Centrifugal_Centrifuge_Protocol_PingRequest {
     get {_storage._ping ?? Centrifugal_Centrifuge_Protocol_PingRequest()}
     set {_uniqueStorage()._ping = newValue}
@@ -141,6 +223,7 @@ struct Centrifugal_Centrifuge_Protocol_Command: @unchecked Sendable {
   /// Clears the value of `ping`. Subsequent reads from it will return its default value.
   mutating func clearPing() {_uniqueStorage()._ping = nil}
 
+  /// Asynchronous message to the server, no Reply is sent in response.
   var send: Centrifugal_Centrifuge_Protocol_SendRequest {
     get {_storage._send ?? Centrifugal_Centrifuge_Protocol_SendRequest()}
     set {_uniqueStorage()._send = newValue}
@@ -184,21 +267,25 @@ struct Centrifugal_Centrifuge_Protocol_Command: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-/// Reply is sent from a server to a client is sent as a response to Command or
-/// can be an async server-to-client Push.
+/// Reply is sent from a server to a client as a response to a Command, or as
+/// an asynchronous server-to-client Push.
+///
+/// An empty Reply (all fields unset, i.e. {} in JSON) is a server ping. When
+/// ConnectResult.pong is set the client must respond to it with an empty
+/// Command.
 struct Centrifugal_Centrifuge_Protocol_Reply: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Id will only be set to a value > 0 for replies to commands. For pushes
-  /// coming from server to client it has zero value.
+  /// Id of the Command this Reply responds to. It is zero for pushes.
   var id: UInt32 {
     get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
-  /// Error can only be set in replies to commands. For pushes it is never set.
+  /// Error of the command. Only set in replies to commands, never for pushes.
+  /// When set, no result field is set.
   var error: Centrifugal_Centrifuge_Protocol_Error {
     get {_storage._error ?? Centrifugal_Centrifuge_Protocol_Error()}
     set {_uniqueStorage()._error = newValue}
@@ -208,8 +295,9 @@ struct Centrifugal_Centrifuge_Protocol_Reply: @unchecked Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   mutating func clearError() {_uniqueStorage()._error = nil}
 
-  /// ProtocolVersion2 server can send one of the following fields. We are not using
-  /// oneof here due to JSON interoperability concerns.
+  /// Server sets at most one of the following fields: push for asynchronous
+  /// pushes, or the result matching the request of the Command. We are not
+  /// using oneof here due to JSON interoperability concerns.
   var push: Centrifugal_Centrifuge_Protocol_Push {
     get {_storage._push ?? Centrifugal_Centrifuge_Protocol_Push()}
     set {_uniqueStorage()._push = newValue}
@@ -318,6 +406,12 @@ struct Centrifugal_Centrifuge_Protocol_Reply: @unchecked Sendable {
   /// Clears the value of `subRefresh`. Subsequent reads from it will return its default value.
   mutating func clearSubRefresh() {_uniqueStorage()._subRefresh = nil}
 
+  /// Server Unix time in milliseconds, set on command replies only.
+  var time: Int64 {
+    get {_storage._time}
+    set {_uniqueStorage()._time = newValue}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -325,26 +419,32 @@ struct Centrifugal_Centrifuge_Protocol_Reply: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-/// Push can be sent to a client as part of Reply in case of bidirectional transport or
-/// without additional wrapping in case of unidirectional transports.
+/// Push is an asynchronous message from a server to a client. It is sent
+/// inside Reply.push on bidirectional transports, and without additional
+/// wrapping on unidirectional transports. An empty Push on a unidirectional
+/// transport is a server ping, no response is expected.
 struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Optional numeric channel ID to avoid sending string channel in Push (bandwidth optimization).
+  /// Optional numeric channel id, used instead of channel to save bandwidth.
+  /// Only used in pub, join and leave pushes of subscriptions where the client
+  /// requested a numeric channel id and the server provided one in
+  /// SubscribeResult.id. When it is used, channel is empty.
   var id: Int64 {
     get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
+  /// Channel the push relates to. Empty for pushes not related to a channel
+  /// (message, connect, disconnect, refresh) and when id is used.
   var channel: String {
     get {_storage._channel}
     set {_uniqueStorage()._channel = newValue}
   }
 
-  /// Server can push one of the following fields to the client. We are
-  /// not using oneof here due to JSON interoperability concerns.
+  /// Publication in a subscribed channel.
   var pub: Centrifugal_Centrifuge_Protocol_Publication {
     get {_storage._pub ?? Centrifugal_Centrifuge_Protocol_Publication()}
     set {_uniqueStorage()._pub = newValue}
@@ -354,6 +454,8 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `pub`. Subsequent reads from it will return its default value.
   mutating func clearPub() {_uniqueStorage()._pub = nil}
 
+  /// A client subscribed to the channel, only sent when join/leave pushes are
+  /// enabled for the subscription.
   var join: Centrifugal_Centrifuge_Protocol_Join {
     get {_storage._join ?? Centrifugal_Centrifuge_Protocol_Join()}
     set {_uniqueStorage()._join = newValue}
@@ -363,6 +465,8 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `join`. Subsequent reads from it will return its default value.
   mutating func clearJoin() {_uniqueStorage()._join = nil}
 
+  /// A client unsubscribed from the channel, only sent when join/leave pushes
+  /// are enabled for the subscription.
   var leave: Centrifugal_Centrifuge_Protocol_Leave {
     get {_storage._leave ?? Centrifugal_Centrifuge_Protocol_Leave()}
     set {_uniqueStorage()._leave = newValue}
@@ -372,6 +476,7 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `leave`. Subsequent reads from it will return its default value.
   mutating func clearLeave() {_uniqueStorage()._leave = nil}
 
+  /// Server unsubscribed the client from the channel.
   var unsubscribe: Centrifugal_Centrifuge_Protocol_Unsubscribe {
     get {_storage._unsubscribe ?? Centrifugal_Centrifuge_Protocol_Unsubscribe()}
     set {_uniqueStorage()._unsubscribe = newValue}
@@ -381,6 +486,7 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `unsubscribe`. Subsequent reads from it will return its default value.
   mutating func clearUnsubscribe() {_uniqueStorage()._unsubscribe = nil}
 
+  /// Asynchronous message from the server to the client, not related to a channel.
   var message: Centrifugal_Centrifuge_Protocol_Message {
     get {_storage._message ?? Centrifugal_Centrifuge_Protocol_Message()}
     set {_uniqueStorage()._message = newValue}
@@ -390,6 +496,7 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {_uniqueStorage()._message = nil}
 
+  /// Server subscribed the client to the channel (server-side subscription).
   var subscribe: Centrifugal_Centrifuge_Protocol_Subscribe {
     get {_storage._subscribe ?? Centrifugal_Centrifuge_Protocol_Subscribe()}
     set {_uniqueStorage()._subscribe = newValue}
@@ -399,6 +506,8 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `subscribe`. Subsequent reads from it will return its default value.
   mutating func clearSubscribe() {_uniqueStorage()._subscribe = nil}
 
+  /// Connection established. Only sent on unidirectional transports, where it
+  /// is the first push and replaces ConnectResult.
   var connect: Centrifugal_Centrifuge_Protocol_Connect {
     get {_storage._connect ?? Centrifugal_Centrifuge_Protocol_Connect()}
     set {_uniqueStorage()._connect = newValue}
@@ -408,6 +517,8 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `connect`. Subsequent reads from it will return its default value.
   mutating func clearConnect() {_uniqueStorage()._connect = nil}
 
+  /// Server is closing the connection. May not be sent on transports which
+  /// deliver code and reason natively (e.g. in a WebSocket close frame).
   var disconnect: Centrifugal_Centrifuge_Protocol_Disconnect {
     get {_storage._disconnect ?? Centrifugal_Centrifuge_Protocol_Disconnect()}
     set {_uniqueStorage()._disconnect = newValue}
@@ -417,6 +528,7 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   /// Clears the value of `disconnect`. Subsequent reads from it will return its default value.
   mutating func clearDisconnect() {_uniqueStorage()._disconnect = nil}
 
+  /// Connection credentials refreshed on the server side.
   var refresh: Centrifugal_Centrifuge_Protocol_Refresh {
     get {_storage._refresh ?? Centrifugal_Centrifuge_Protocol_Refresh()}
     set {_uniqueStorage()._refresh = newValue}
@@ -433,18 +545,75 @@ struct Centrifugal_Centrifuge_Protocol_Push: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-/// ClientInfo contains information about client connection.
+/// Dictionary is a shared compression dictionary the server asks the client to
+/// use for subsequent frames on this connection. It arrives in the connect
+/// reply, and every frame after that reply starts with a one byte codec marker
+/// saying whether it was compressed.
+struct Centrifugal_Centrifuge_Protocol_Dictionary: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Identifier of dictionary content, client may cache by it.
+  ///
+  /// It is SHA-256 of the content, first 12 bytes, base64url without padding.
+  ///
+  /// The derivation is fixed rather than conventional, because a client that
+  /// keeps a dictionary between connections hashes the bytes it stored against
+  /// this id before reusing them. Storage shared with anything else on the
+  /// client's origin can be rewritten, and DEFLATE back references resolve into
+  /// the dictionary - so substituted content does not corrupt a frame, it makes
+  /// a genuine server frame decode into whatever the substituter chose. Only an
+  /// id the server issued detects that: a checksum the client stored alongside
+  /// would simply be rewritten with the bytes.
+  ///
+  /// A server identifying dictionaries some other way is not rejected. It has
+  /// every caching client quietly stop caching instead, which is worse.
+  ///
+  /// It also means one id can never name two different dictionaries, so a client
+  /// reconnecting to a node that built its own gets an exact match or a miss,
+  /// never the wrong bytes.
+  var id: String = String()
+
+  /// The dictionary content, always DEFLATE compressed. Inflate it with no preset
+  /// dictionary before use.
+  ///
+  /// It is compressed because it arrives in the connect reply, which cannot be
+  /// compressed at the frame level - nothing is installed yet to compress it
+  /// against. Compressing the content instead is worth about 8x on JSON, and a
+  /// dictionary is sampled message text so it always compresses.
+  ///
+  /// data is set on Protobuf connections, where bytes travel directly. data_b64
+  /// is set on JSON connections, where a bytes field carries raw JSON and cannot
+  /// hold binary - it is standard base64 with padding of the same compressed
+  /// content. Exactly one of them is set, and neither when the server is naming
+  /// a dictionary the client already holds.
+  var data: Data = Data()
+
+  var dataB64: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// ClientInfo contains information about a client connection.
 struct Centrifugal_Centrifuge_Protocol_ClientInfo: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// User id. Empty for anonymous connections.
   var user: String = String()
 
+  /// Unique client (connection) id.
   var client: String = String()
 
+  /// Optional connection info attached by the application at connect time,
+  /// may be updated on connection refresh.
   var connInfo: Data = Data()
 
+  /// Optional channel info attached by the application at subscribe time.
   var chanInfo: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -452,16 +621,19 @@ struct Centrifugal_Centrifuge_Protocol_ClientInfo: Sendable {
   init() {}
 }
 
-/// Publication in channel.
+/// Publication in a channel.
 struct Centrifugal_Centrifuge_Protocol_Publication: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// Data contains publication payload.
+  /// Publication payload. When Publication.delta is set it is a delta patch
+  /// against the previous payload. On JSON connections with delta compression
+  /// negotiated it is a JSON string with the payload (or patch) inside.
   var data: Data = Data()
 
-  /// Info contains optional information about publisher. Usually it is set only if publication goes from the client side.
+  /// Optional information about the publisher. Usually it is set only if
+  /// the publication was sent from the client side.
   var info: Centrifugal_Centrifuge_Protocol_ClientInfo {
     get {_info ?? Centrifugal_Centrifuge_Protocol_ClientInfo()}
     set {_info = newValue}
@@ -471,36 +643,49 @@ struct Centrifugal_Centrifuge_Protocol_Publication: Sendable {
   /// Clears the value of `info`. Subsequent reads from it will return its default value.
   mutating func clearInfo() {self._info = nil}
 
-  /// Offset is a stream offset of the publication. Epoch is given in SubscribeResult.
+  /// Position of the publication in the channel stream. Epoch is given in
+  /// SubscribeResult (and in Publication.epoch when it changes). Zero when the
+  /// channel has no stream.
   var offset: UInt64 = 0
 
-  /// Optional tags associated with publication.
+  /// Optional tags associated with the publication, also used by tags filter,
+  /// see SubscribeRequest.tf.
   var tags: Dictionary<String,String> = [:]
 
-  /// When set indicates that data in Publication is a delta from previous data.
+  /// When set, data is a delta patch against the data of the previous
+  /// publication in this subscription, see SubscribeRequest.delta.
   var delta: Bool = false
 
-  /// Optional time of publication as Unix timestamp milliseconds.
+  /// Time of the publication as Unix timestamp in milliseconds. Used between
+  /// server nodes, not sent to clients by the current server.
   var time: Int64 = 0
 
-  /// Optional channel name if Publication relates to wildcard subscription.
+  /// Channel of the publication. Only set when it differs from the channel of
+  /// the subscription, i.e. for wildcard subscriptions.
   var channel: String = String()
 
-  /// Optional key associated with publication.
+  /// Key of the entry in a map subscription, or of the item in a shared poll
+  /// subscription. For map presence subscriptions it is a client id or a user
+  /// id.
   var key: String = String()
 
-  /// When set indicates that this publication is a removal of a previously published item.
+  /// When set, the publication removes the entry with the given key from map
+  /// (or shared poll) state.
   var removed: Bool = false
 
-  /// Represents score to order.
+  /// Score of the entry used to order ordered map state.
   var score: Int64 = 0
 
-  /// Optional epoch.
+  /// Optional stream epoch, set to let the client learn the new epoch (for
+  /// example on the first publication of a new stream).
   var epoch: String = String()
 
-  /// Previous data for delta computation in broker fan-out.
+  /// Previous data used for delta computation during broker fan-out between
+  /// server nodes. Never sent to clients.
   var prevData: Data = Data()
 
+  /// Version of the item, used by shared poll subscriptions to only deliver
+  /// data newer than the client already has.
   var version: UInt64 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -510,12 +695,13 @@ struct Centrifugal_Centrifuge_Protocol_Publication: Sendable {
   fileprivate var _info: Centrifugal_Centrifuge_Protocol_ClientInfo? = nil
 }
 
-/// Join to channel.
+/// Join is sent when a client subscribes to a channel.
 struct Centrifugal_Centrifuge_Protocol_Join: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Information about the client which subscribed.
   var info: Centrifugal_Centrifuge_Protocol_ClientInfo {
     get {_info ?? Centrifugal_Centrifuge_Protocol_ClientInfo()}
     set {_info = newValue}
@@ -532,12 +718,13 @@ struct Centrifugal_Centrifuge_Protocol_Join: Sendable {
   fileprivate var _info: Centrifugal_Centrifuge_Protocol_ClientInfo? = nil
 }
 
-/// Leave from channel.
+/// Leave is sent when a client unsubscribes from a channel.
 struct Centrifugal_Centrifuge_Protocol_Leave: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Information about the client which unsubscribed.
   var info: Centrifugal_Centrifuge_Protocol_ClientInfo {
     get {_info ?? Centrifugal_Centrifuge_Protocol_ClientInfo()}
     set {_info = newValue}
@@ -554,14 +741,24 @@ struct Centrifugal_Centrifuge_Protocol_Leave: Sendable {
   fileprivate var _info: Centrifugal_Centrifuge_Protocol_ClientInfo? = nil
 }
 
-/// Unsubscribe from channel.
+/// Unsubscribe from a channel, sent by the server.
 struct Centrifugal_Centrifuge_Protocol_Unsubscribe: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Unsubscribe code in range [2000, 2999]. Codes >= 2500 mean the client
+  /// should resubscribe, codes < 2500 mean it should not. Codes [2000, 2099]
+  /// and [2500, 2599] are reserved by Centrifuge. Built-in codes:
+  ///
+  ///   2000 server unsubscribe
+  ///   2500 insufficient state
+  ///   2501 subscription expired
+  ///   2502 state invalidated - client must drop its subscription token and
+  ///        any state accumulated for the subscription before resubscribing
   var code: UInt32 = 0
 
+  /// Human readable reason, for logging and debugging.
   var reason: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -569,20 +766,29 @@ struct Centrifugal_Centrifuge_Protocol_Unsubscribe: Sendable {
   init() {}
 }
 
-/// Subscribe to channel, used for server-side subscriptions.
+/// Subscribe is sent when the server subscribes the client to a channel
+/// (server-side subscription) after the connection was established. Server-side
+/// subscriptions established at connect time are delivered in
+/// ConnectResult.subs instead.
 struct Centrifugal_Centrifuge_Protocol_Subscribe: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// When set the subscription supports recovery: the client should keep the
+  /// stream position and pass it in ConnectRequest.subs on reconnect.
   var recoverable: Bool = false
 
+  /// Current stream epoch.
   var epoch: String = String()
 
+  /// Current stream offset.
   var offset: UInt64 = 0
 
+  /// When set the client should track stream position of the subscription.
   var positioned: Bool = false
 
+  /// Optional custom data attached to the subscription by the application.
   var data: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -590,12 +796,14 @@ struct Centrifugal_Centrifuge_Protocol_Subscribe: Sendable {
   init() {}
 }
 
-/// Message from client to server. No Reply is sent in response to Message.
+/// Message is an asynchronous message sent from the server to the client. It is
+/// not related to any channel and the client does not reply to it.
 struct Centrifugal_Centrifuge_Protocol_Message: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Message payload.
   var data: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -603,6 +811,8 @@ struct Centrifugal_Centrifuge_Protocol_Message: Sendable {
   init() {}
 }
 
+/// Connect is the first push on unidirectional transports, it is the
+/// equivalent of ConnectResult. See ConnectResult for field descriptions.
 struct Centrifugal_Centrifuge_Protocol_Connect: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -622,6 +832,7 @@ struct Centrifugal_Centrifuge_Protocol_Connect: Sendable {
 
   var ping: UInt32 = 0
 
+  /// Never set on unidirectional transports: the client can not send a pong.
   var pong: Bool = false
 
   var session: String = String()
@@ -636,15 +847,30 @@ struct Centrifugal_Centrifuge_Protocol_Connect: Sendable {
   init() {}
 }
 
+/// Disconnect is sent when the server closes the connection.
+///
+/// Code ranges:
+///
+///   [0, 2999]    reserved for client-side and transport specific needs.
+///   [3000, 3499] reserved by Centrifuge, client should reconnect.
+///   [3500, 3999] reserved by Centrifuge, terminal - client must not reconnect.
+///   [4000, 4499] application codes, client should reconnect.
+///   [4500, 4999] application codes, terminal - client must not reconnect.
+///   >= 5000      reserved by Centrifuge, client should reconnect.
 struct Centrifugal_Centrifuge_Protocol_Disconnect: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Disconnect code, see the code ranges above.
   var code: UInt32 = 0
 
+  /// Human readable reason. Less than 127 bytes due to WebSocket close frame
+  /// limitations.
   var reason: String = String()
 
+  /// Deprecated: not set by the current server. Clients decide whether to
+  /// reconnect based on code.
   var reconnect: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -652,13 +878,17 @@ struct Centrifugal_Centrifuge_Protocol_Disconnect: Sendable {
   init() {}
 }
 
+/// Refresh is sent when connection credentials were refreshed on the server
+/// side.
 struct Centrifugal_Centrifuge_Protocol_Refresh: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// When set the connection expires, ttl contains time until expiration.
   var expires: Bool = false
 
+  /// Seconds until the connection expires.
   var ttl: UInt32 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -666,150 +896,319 @@ struct Centrifugal_Centrifuge_Protocol_Refresh: Sendable {
   init() {}
 }
 
+/// ConnectRequest authenticates a connection. It must be the first command sent
+/// by a client.
 struct Centrifugal_Centrifuge_Protocol_ConnectRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Connection token (JWT in Centrifugo), optional if the server can
+  /// authenticate the connection in another way.
   var token: String = String()
 
+  /// Optional custom data passed to the application connect handler.
   var data: Data = Data()
 
+  /// Server-side subscriptions the client wants to restore, keyed by channel.
+  /// Only recover, epoch, offset and delta of each SubscribeRequest are used -
+  /// they let the server recover publications the client missed since its
+  /// last known position. The server decides which subscriptions are granted.
   var subs: Dictionary<String,Centrifugal_Centrifuge_Protocol_SubscribeRequest> = [:]
 
+  /// Name of the client SDK or application.
   var name: String = String()
 
+  /// Version of the client SDK or application.
   var version: String = String()
 
+  /// Custom headers to pass to the server. Used when a transport does not
+  /// allow setting HTTP headers (e.g. WebSocket in a browser), the application
+  /// decides how to use them.
   var headers: Dictionary<String,String> = [:]
 
-  /// Enable connection level features.
+  /// Connection level features this client supports, as a bitmask. The server
+  /// replies with the subset it enabled in ConnectResult.flag.
+  ///
+  ///   1 << 0  dictionary compression, see Dictionary.
   var flag: Int64 = 0
 
-  var unknownFields = SwiftProtobuf.UnknownStorage()
+  /// Application context this connection belongs to - which view, screen or
+  /// client kind it is. Connections sharing a profile see traffic of a similar
+  /// shape.
+  ///
+  /// Untrusted: the server may override it, and features built on it must treat
+  /// it as a hint rather than an assertion.
+  var profile: String = String()
 
-  init() {}
-}
+  /// Id of the compression dictionary this client already holds, so the server
+  /// can name it instead of sending it again.
+  ///
+  /// The server answers with a Dictionary carrying only an id when it recognises
+  /// this one, and with the full content otherwise - so an unknown id is a cache
+  /// miss rather than an error.
+  ///
+  /// An id is a hash of the dictionary content, so this id and the server's copy
+  /// are byte identical by construction: a dictionary that changes gets a new id
+  /// automatically.
+  ///
+  /// Deliberately one, not a list. A client caches the last dictionary it was
+  /// given, which is the one it needs when reconnecting to the same profile. The
+  /// cost is one extra transfer per hop during a rolling deploy where nodes
+  /// disagree, which is bounded and small.
+  var dict: String = String()
 
-struct Centrifugal_Centrifuge_Protocol_ConnectResult: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var client: String = String()
-
-  var version: String = String()
-
-  var expires: Bool = false
-
-  var ttl: UInt32 = 0
-
-  var data: Data = Data()
-
-  var subs: Dictionary<String,Centrifugal_Centrifuge_Protocol_SubscribeResult> = [:]
-
-  var ping: UInt32 = 0
-
-  var pong: Bool = false
-
-  var session: String = String()
-
-  var node: String = String()
-
-  /// Server time as Unix timestamp in milliseconds (not sent by default).
-  var time: Int64 = 0
+  /// Client-persisted install id.
+  var instance: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
 
-struct Centrifugal_Centrifuge_Protocol_RefreshRequest: Sendable {
+/// ConnectResult is the result of a successful connect.
+struct Centrifugal_Centrifuge_Protocol_ConnectResult: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var token: String = String()
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-}
-
-struct Centrifugal_Centrifuge_Protocol_RefreshResult: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var client: String = String()
-
-  var version: String = String()
-
-  var expires: Bool = false
-
-  var ttl: UInt32 = 0
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-}
-
-struct Centrifugal_Centrifuge_Protocol_SubscribeRequest: @unchecked Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var channel: String {
-    get {_storage._channel}
-    set {_uniqueStorage()._channel = newValue}
+  /// Unique client (connection) id assigned by the server.
+  var client: String {
+    get {_storage._client}
+    set {_uniqueStorage()._client = newValue}
   }
 
-  var token: String {
-    get {_storage._token}
-    set {_uniqueStorage()._token = newValue}
+  /// Server version.
+  var version: String {
+    get {_storage._version}
+    set {_uniqueStorage()._version = newValue}
   }
 
-  var recover: Bool {
-    get {_storage._recover}
-    set {_uniqueStorage()._recover = newValue}
+  /// When set the connection expires and the client must send RefreshRequest
+  /// with a new token before ttl elapses.
+  var expires: Bool {
+    get {_storage._expires}
+    set {_uniqueStorage()._expires = newValue}
   }
 
-  var epoch: String {
-    get {_storage._epoch}
-    set {_uniqueStorage()._epoch = newValue}
+  /// Seconds until the connection expires.
+  var ttl: UInt32 {
+    get {_storage._ttl}
+    set {_uniqueStorage()._ttl = newValue}
   }
 
-  var offset: UInt64 {
-    get {_storage._offset}
-    set {_uniqueStorage()._offset = newValue}
-  }
-
+  /// Optional custom data returned by the application connect handler.
   var data: Data {
     get {_storage._data}
     set {_uniqueStorage()._data = newValue}
   }
 
+  /// Server-side subscriptions of the connection, keyed by channel.
+  var subs: Dictionary<String,Centrifugal_Centrifuge_Protocol_SubscribeResult> {
+    get {_storage._subs}
+    set {_uniqueStorage()._subs = newValue}
+  }
+
+  /// Server ping interval in seconds, zero when the server does not send pings.
+  /// The client may consider the connection lost if no data (including pings)
+  /// arrived from the server for noticeably longer than this interval.
+  var ping: UInt32 {
+    get {_storage._ping}
+    set {_uniqueStorage()._ping = newValue}
+  }
+
+  /// When set the client must respond to every server ping (empty Reply) with
+  /// a pong (empty Command), otherwise the server closes the connection.
+  var pong: Bool {
+    get {_storage._pong}
+    set {_uniqueStorage()._pong = newValue}
+  }
+
+  /// Session of the connection, set for unidirectional transports and for
+  /// bidirectional emulation, see EmulationRequest.session.
+  var session: String {
+    get {_storage._session}
+    set {_uniqueStorage()._session = newValue}
+  }
+
+  /// Id of the node serving the connection, set for bidirectional emulation,
+  /// see EmulationRequest.node.
+  var node: String {
+    get {_storage._node}
+    set {_uniqueStorage()._node = newValue}
+  }
+
+  /// Server time as Unix timestamp in milliseconds (not sent by default).
+  var time: Int64 {
+    get {_storage._time}
+    set {_uniqueStorage()._time = newValue}
+  }
+
+  /// Connection level features the server actually enabled, using the same bits
+  /// as ConnectRequest.flag. A client can not assume a feature it advertised was
+  /// accepted - the server may have it disabled, or may decline per connection -
+  /// so this is how it finds out.
+  var flag: Int64 {
+    get {_storage._flag}
+    set {_uniqueStorage()._flag = newValue}
+  }
+
+  /// Compression dictionary for this connection, when the server enabled
+  /// dictionary compression.
+  ///
+  /// It travels in the connect reply rather than a push so there is no ordering
+  /// rule to get wrong: this frame is raw, and every frame after it is
+  /// compressed. It carries only an id when the client advertised that same id in
+  /// ConnectRequest.dict, since the client already holds the bytes.
+  var dict: Centrifugal_Centrifuge_Protocol_Dictionary {
+    get {_storage._dict ?? Centrifugal_Centrifuge_Protocol_Dictionary()}
+    set {_uniqueStorage()._dict = newValue}
+  }
+  /// Returns true if `dict` has been explicitly set.
+  var hasDict: Bool {_storage._dict != nil}
+  /// Clears the value of `dict`. Subsequent reads from it will return its default value.
+  mutating func clearDict() {_uniqueStorage()._dict = nil}
+
+  /// User the connection is authenticated as.
+  var user: String {
+    get {_storage._user}
+    set {_uniqueStorage()._user = newValue}
+  }
+
+  /// Authentication class of the connection.
+  var authClass: String {
+    get {_storage._authClass}
+    set {_uniqueStorage()._authClass = newValue}
+  }
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// RefreshRequest refreshes an expiring connection with a new token.
+struct Centrifugal_Centrifuge_Protocol_RefreshRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// New connection token, required.
+  var token: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// RefreshResult is the result of a connection refresh.
+struct Centrifugal_Centrifuge_Protocol_RefreshResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Not set by the current server.
+  var client: String = String()
+
+  /// Not set by the current server.
+  var version: String = String()
+
+  /// When set the connection still expires, ttl contains time until expiration.
+  var expires: Bool = false
+
+  /// Seconds until the connection expires.
+  var ttl: UInt32 = 0
+
+  /// User the connection is authenticated as.
+  var user: String = String()
+
+  /// Authentication class of the connection.
+  var authClass: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// SubscribeRequest subscribes the client to a channel.
+///
+/// Some fields only apply to specific subscription types, see type.
+struct Centrifugal_Centrifuge_Protocol_SubscribeRequest: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Channel to subscribe to, required.
+  var channel: String {
+    get {_storage._channel}
+    set {_uniqueStorage()._channel = newValue}
+  }
+
+  /// Optional subscription token (JWT in Centrifugo).
+  var token: String {
+    get {_storage._token}
+    set {_uniqueStorage()._token = newValue}
+  }
+
+  /// When set the client asks the server to recover publications missed since
+  /// the stream position given in epoch and offset.
+  var recover: Bool {
+    get {_storage._recover}
+    set {_uniqueStorage()._recover = newValue}
+  }
+
+  /// Stream epoch of the last known position.
+  var epoch: String {
+    get {_storage._epoch}
+    set {_uniqueStorage()._epoch = newValue}
+  }
+
+  /// Stream offset of the last known position.
+  var offset: UInt64 {
+    get {_storage._offset}
+    set {_uniqueStorage()._offset = newValue}
+  }
+
+  /// Optional custom data passed to the application subscribe handler.
+  var data: Data {
+    get {_storage._data}
+    set {_uniqueStorage()._data = newValue}
+  }
+
+  /// Hint that the client wants a positioned subscription. The final decision
+  /// is made by the server, see SubscribeResult.positioned.
   var positioned: Bool {
     get {_storage._positioned}
     set {_uniqueStorage()._positioned = newValue}
   }
 
+  /// Hint that the client wants a recoverable subscription. The final decision
+  /// is made by the server, see SubscribeResult.recoverable.
   var recoverable: Bool {
     get {_storage._recoverable}
     set {_uniqueStorage()._recoverable = newValue}
   }
 
+  /// Hint that the client wants join/leave pushes. The final decision is made
+  /// by the server.
   var joinLeave: Bool {
     get {_storage._joinLeave}
     set {_uniqueStorage()._joinLeave = newValue}
   }
 
+  /// Delta compression type the client wants for publications. The only
+  /// supported value is "fossil". Whether it was negotiated is reported in
+  /// SubscribeResult.delta.
   var delta: String {
     get {_storage._delta}
     set {_uniqueStorage()._delta = newValue}
   }
 
-  /// Optional server side filter based on publication tags .
+  /// Optional server-side filter based on publication tags. Only publications
+  /// matching the filter are delivered. Must be allowed by the server, and
+  /// disables delta compression. Meant to reduce bandwidth, not as an access
+  /// control mechanism.
   var tf: Centrifugal_Centrifuge_Protocol_FilterNode {
     get {_storage._tf ?? Centrifugal_Centrifuge_Protocol_FilterNode()}
     set {_uniqueStorage()._tf = newValue}
@@ -819,32 +1218,55 @@ struct Centrifugal_Centrifuge_Protocol_SubscribeRequest: @unchecked Sendable {
   /// Clears the value of `tf`. Subsequent reads from it will return its default value.
   mutating func clearTf() {_uniqueStorage()._tf = nil}
 
-  /// Enable subscription level features.
+  /// Subscription level features, as a bitmask:
+  ///
+  ///   1 << 0  numeric channel id requested, see SubscribeResult.id.
+  ///   1 << 1  reject unrecovered: fail the subscription with error 112
+  ///           (unrecoverable position) instead of succeeding with
+  ///           SubscribeResult.recovered unset when recovery is not possible.
   var flag: Int64 {
     get {_storage._flag}
     set {_uniqueStorage()._flag = newValue}
   }
 
+  /// Subscription type:
+  ///
+  ///   0  stream - regular channel subscription (default).
+  ///   1  map - subscription to map state with stream of changes.
+  ///   2  map clients - map of clients present in the channel.
+  ///   3  map users - map of users present in the channel.
+  ///   4  shared poll.
   var type: Int32 {
     get {_storage._type}
     set {_uniqueStorage()._type = newValue}
   }
 
+  /// Phase of a map subscription:
+  ///
+  ///   0  live - join real-time updates (default).
+  ///   1  stream - page through stream (catch-up).
+  ///   2  state - page through map state.
   var phase: Int32 {
     get {_storage._phase}
     set {_uniqueStorage()._phase = newValue}
   }
 
+  /// Map subscriptions: cursor of the state page to load, from
+  /// SubscribeResult.cursor. Empty for the first page.
   var cursor: String {
     get {_storage._cursor}
     set {_uniqueStorage()._cursor = newValue}
   }
 
+  /// Map subscriptions: page size. Zero or negative means server default. The
+  /// server clamps it to its configured bounds.
   var limit: Int32 {
     get {_storage._limit}
     set {_uniqueStorage()._limit = newValue}
   }
 
+  /// Map subscriptions, state phase: when set ordered map state is returned
+  /// in ascending order, descending is the default. Ignored for unordered maps.
   var asc: Bool {
     get {_storage._asc}
     set {_uniqueStorage()._asc = newValue}
@@ -857,97 +1279,122 @@ struct Centrifugal_Centrifuge_Protocol_SubscribeRequest: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
+/// SubscribeResult is the result of a successful subscribe. It is also used to
+/// describe server-side subscriptions in ConnectResult.subs.
 struct Centrifugal_Centrifuge_Protocol_SubscribeResult: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// When set the subscription expires and the client must send
+  /// SubRefreshRequest with a new token before ttl elapses.
   var expires: Bool {
     get {_storage._expires}
     set {_uniqueStorage()._expires = newValue}
   }
 
+  /// Seconds until the subscription expires.
   var ttl: UInt32 {
     get {_storage._ttl}
     set {_uniqueStorage()._ttl = newValue}
   }
 
+  /// When set the subscription supports recovery: the client should keep the
+  /// stream position and use it on resubscribe.
   var recoverable: Bool {
     get {_storage._recoverable}
     set {_uniqueStorage()._recoverable = newValue}
   }
 
+  /// Current stream epoch.
   var epoch: String {
     get {_storage._epoch}
     set {_uniqueStorage()._epoch = newValue}
   }
 
+  /// Publications: recovered after the requested position, initial
+  /// publications provided by the application, or stream page for maps.
   var publications: [Centrifugal_Centrifuge_Protocol_Publication] {
     get {_storage._publications}
     set {_uniqueStorage()._publications = newValue}
   }
 
+  /// When set the client successfully recovered all missed publications.
   var recovered: Bool {
     get {_storage._recovered}
     set {_uniqueStorage()._recovered = newValue}
   }
 
+  /// Stream offset. The current stream top, or - when publications were
+  /// recovered - the position the client advances from by applying them.
   var offset: UInt64 {
     get {_storage._offset}
     set {_uniqueStorage()._offset = newValue}
   }
 
+  /// When set the client should track stream position of the subscription.
   var positioned: Bool {
     get {_storage._positioned}
     set {_uniqueStorage()._positioned = newValue}
   }
 
+  /// Optional custom data attached to the subscription by the application.
   var data: Data {
     get {_storage._data}
     set {_uniqueStorage()._data = newValue}
   }
 
+  /// When set the server attempted recovery for this subscription, check
+  /// recovered for the outcome.
   var wasRecovering: Bool {
     get {_storage._wasRecovering}
     set {_uniqueStorage()._wasRecovering = newValue}
   }
 
+  /// When set delta compression was negotiated, and Publication.delta tells
+  /// whether a publication carries a delta patch.
   var delta: Bool {
     get {_storage._delta}
     set {_uniqueStorage()._delta = newValue}
   }
 
-  /// Optional numeric channel ID to avoid sending string channel in the following Pushes (bandwidth optimization).
+  /// Optional numeric channel id to avoid sending string channel in the
+  /// following pushes (bandwidth optimization). Set when requested with
+  /// SubscribeRequest.flag and allowed by the server, see Push.id.
   var id: Int64 {
     get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
-  /// Server must echo back type.
+  /// Type of the subscription: 0 for stream, 1 for all map types (including
+  /// map clients and map users), 4 for shared poll.
   var type: Int32 {
     get {_storage._type}
     set {_uniqueStorage()._type = newValue}
   }
 
-  /// The result phase of the operation (LIVE = 0, STREAM = 1, STATE = 2)
+  /// The result phase of a map subscription (live = 0, stream = 1,
+  /// state = 2), see SubscribeRequest.phase.
   var phase: Int32 {
     get {_storage._phase}
     set {_uniqueStorage()._phase = newValue}
   }
 
-  /// Next page cursor (empty = last page)
+  /// Map subscriptions, state phase: cursor of the next page. Empty when this
+  /// is the last state page.
   var cursor: String {
     get {_storage._cursor}
     set {_uniqueStorage()._cursor = newValue}
   }
 
-  /// Channel state entries.
+  /// Map subscriptions: state entries.
   var state: [Centrifugal_Centrifuge_Protocol_Publication] {
     get {_storage._state}
     set {_uniqueStorage()._state = newValue}
   }
 
-  /// in ms, if >0 SDK should debounce publications to this channel. First one should not be debounced.
+  /// Interval in milliseconds. When > 0 the SDK should debounce client
+  /// publications to this channel; the first one is not debounced.
   var publishDebounce: UInt32 {
     get {_storage._publishDebounce}
     set {_uniqueStorage()._publishDebounce = newValue}
@@ -960,13 +1407,17 @@ struct Centrifugal_Centrifuge_Protocol_SubscribeResult: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
+/// KeyedItem is a key the client tracks in a shared poll subscription.
 struct Centrifugal_Centrifuge_Protocol_KeyedItem: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Item key.
   var key: String = String()
 
+  /// Version of the item data the client currently holds, zero when it has
+  /// none. The server only sends data with a greater version.
   var version: UInt64 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -974,15 +1425,18 @@ struct Centrifugal_Centrifuge_Protocol_KeyedItem: Sendable {
   init() {}
 }
 
+/// TrackBatch is a set of keys to track authorized by a single signature.
 struct Centrifugal_Centrifuge_Protocol_TrackBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// HMAC over (iat, expiry, user, channel, keys)
+  /// Signature issued by the application backend, an HMAC over (iat, expiry,
+  /// user, channel, keys).
   var signature: String = String()
 
-  /// FULL key set the signature was computed over;
+  /// Full key set the signature was computed over, with versions the client
+  /// currently holds.
   var items: [Centrifugal_Centrifuge_Protocol_KeyedItem] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -990,22 +1444,30 @@ struct Centrifugal_Centrifuge_Protocol_TrackBatch: Sendable {
   init() {}
 }
 
+/// SubRefreshRequest refreshes an expiring subscription with a new token, or
+/// manages tracked keys of a shared poll subscription.
 struct Centrifugal_Centrifuge_Protocol_SubRefreshRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel of the subscription, required.
   var channel: String = String()
 
+  /// New subscription token, required for type 0.
   var token: String = String()
 
-  /// 0=sub_refresh, 1=track, 2=untrack
+  /// Request type:
+  ///
+  ///   0  refresh subscription token (default).
+  ///   1  track keys (shared poll), see track.
+  ///   2  untrack keys (shared poll), see untrack.
   var type: Int32 = 0
 
-  /// for type=1
+  /// Batches of keys to start tracking, for type 1.
   var track: [Centrifugal_Centrifuge_Protocol_TrackBatch] = []
 
-  /// for type=2
+  /// Keys to stop tracking, for type 2. Also honoured with type 1.
   var untrack: [String] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1013,16 +1475,21 @@ struct Centrifugal_Centrifuge_Protocol_SubRefreshRequest: Sendable {
   init() {}
 }
 
+/// SubRefreshResult is the result of SubRefreshRequest.
 struct Centrifugal_Centrifuge_Protocol_SubRefreshResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// When set the subscription (or tracked keys) expire.
   var expires: Bool = false
 
-  /// for type=0: token TTL. for type=1: MIN TTL across all batches.
+  /// Seconds until expiration. For type 0 - until the subscription token
+  /// expires. For type 1 - minimal ttl across all tracked batches.
   var ttl: UInt32 = 0
 
+  /// Type 1: latest data of tracked keys for which the server has a version
+  /// newer than the client sent.
   var items: [Centrifugal_Centrifuge_Protocol_Publication] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1030,11 +1497,13 @@ struct Centrifugal_Centrifuge_Protocol_SubRefreshResult: Sendable {
   init() {}
 }
 
+/// UnsubscribeRequest unsubscribes the client from a channel.
 struct Centrifugal_Centrifuge_Protocol_UnsubscribeRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel to unsubscribe from.
   var channel: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1042,6 +1511,7 @@ struct Centrifugal_Centrifuge_Protocol_UnsubscribeRequest: Sendable {
   init() {}
 }
 
+/// UnsubscribeResult is the result of an unsubscribe.
 struct Centrifugal_Centrifuge_Protocol_UnsubscribeResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1052,22 +1522,26 @@ struct Centrifugal_Centrifuge_Protocol_UnsubscribeResult: Sendable {
   init() {}
 }
 
+/// PublishRequest publishes data to a channel.
 struct Centrifugal_Centrifuge_Protocol_PublishRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel to publish to, required.
   var channel: String = String()
 
+  /// Publication payload.
   var data: Data = Data()
 
-  /// 0 = regular (default), 1 = map
+  /// Publish type: 0 - regular publication (default), 1 - map publication.
   var type: Int32 = 0
 
-  /// Map publish: key to publish/remove
+  /// Map publication: key of the entry to publish or remove. Passed to the
+  /// application publish handler, which decides the final key.
   var key: String = String()
 
-  /// Map publish: true = remove this key
+  /// Map publication: when set the entry with the key is removed.
   var removed: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1075,6 +1549,7 @@ struct Centrifugal_Centrifuge_Protocol_PublishRequest: Sendable {
   init() {}
 }
 
+/// PublishResult is the result of a publish.
 struct Centrifugal_Centrifuge_Protocol_PublishResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1085,11 +1560,13 @@ struct Centrifugal_Centrifuge_Protocol_PublishResult: Sendable {
   init() {}
 }
 
+/// PresenceRequest asks for the presence information of a channel.
 struct Centrifugal_Centrifuge_Protocol_PresenceRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel to get presence of, required.
   var channel: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1097,11 +1574,13 @@ struct Centrifugal_Centrifuge_Protocol_PresenceRequest: Sendable {
   init() {}
 }
 
+/// PresenceResult is the result of a presence request.
 struct Centrifugal_Centrifuge_Protocol_PresenceResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Clients present in the channel, keyed by client id.
   var presence: Dictionary<String,Centrifugal_Centrifuge_Protocol_ClientInfo> = [:]
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1109,11 +1588,13 @@ struct Centrifugal_Centrifuge_Protocol_PresenceResult: Sendable {
   init() {}
 }
 
+/// PresenceStatsRequest asks for the presence stats of a channel.
 struct Centrifugal_Centrifuge_Protocol_PresenceStatsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel to get presence stats of, required.
   var channel: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1121,13 +1602,16 @@ struct Centrifugal_Centrifuge_Protocol_PresenceStatsRequest: Sendable {
   init() {}
 }
 
+/// PresenceStatsResult is the result of a presence stats request.
 struct Centrifugal_Centrifuge_Protocol_PresenceStatsResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Number of clients (connections) in the channel.
   var numClients: UInt32 = 0
 
+  /// Number of unique users in the channel.
   var numUsers: UInt32 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1135,13 +1619,17 @@ struct Centrifugal_Centrifuge_Protocol_PresenceStatsResult: Sendable {
   init() {}
 }
 
+/// StreamPosition is a position in a channel stream.
 struct Centrifugal_Centrifuge_Protocol_StreamPosition: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Stream offset.
   var offset: UInt64 = 0
 
+  /// Stream epoch. Changes when the stream is reset (e.g. history expired or
+  /// lost), offsets of different epochs are not comparable.
   var epoch: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1149,15 +1637,24 @@ struct Centrifugal_Centrifuge_Protocol_StreamPosition: Sendable {
   init() {}
 }
 
+/// HistoryRequest asks for the publication history of a channel.
 struct Centrifugal_Centrifuge_Protocol_HistoryRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Channel to get history of, required.
   var channel: String = String()
 
+  /// Maximum number of publications to return. Zero returns no publications,
+  /// only the current stream position. -1 returns all publications. The server
+  /// may cap it with its configured limit.
   var limit: Int32 = 0
 
+  /// Optional position to iterate from: publications after it are returned
+  /// (before it when reverse is set). An epoch mismatch results in error
+  /// 112 (unrecoverable position), a zero offset with reverse set - in error
+  /// 107 (bad request).
   var since: Centrifugal_Centrifuge_Protocol_StreamPosition {
     get {_since ?? Centrifugal_Centrifuge_Protocol_StreamPosition()}
     set {_since = newValue}
@@ -1167,6 +1664,7 @@ struct Centrifugal_Centrifuge_Protocol_HistoryRequest: Sendable {
   /// Clears the value of `since`. Subsequent reads from it will return its default value.
   mutating func clearSince() {self._since = nil}
 
+  /// When set publications are returned from newest to oldest.
   var reverse: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1176,15 +1674,19 @@ struct Centrifugal_Centrifuge_Protocol_HistoryRequest: Sendable {
   fileprivate var _since: Centrifugal_Centrifuge_Protocol_StreamPosition? = nil
 }
 
+/// HistoryResult is the result of a history request.
 struct Centrifugal_Centrifuge_Protocol_HistoryResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Publications from the stream.
   var publications: [Centrifugal_Centrifuge_Protocol_Publication] = []
 
+  /// Current stream epoch.
   var epoch: String = String()
 
+  /// Current stream top offset.
   var offset: UInt64 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1192,6 +1694,9 @@ struct Centrifugal_Centrifuge_Protocol_HistoryResult: Sendable {
   init() {}
 }
 
+/// PingRequest is not supported by the server at the moment: a command carrying
+/// it is rejected. Connection liveness is checked with server pings (empty
+/// Reply) and client pongs (empty Command), see ConnectResult.pong.
 struct Centrifugal_Centrifuge_Protocol_PingRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1202,6 +1707,7 @@ struct Centrifugal_Centrifuge_Protocol_PingRequest: Sendable {
   init() {}
 }
 
+/// PingResult is reserved for a response to PingRequest.
 struct Centrifugal_Centrifuge_Protocol_PingResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1212,37 +1718,70 @@ struct Centrifugal_Centrifuge_Protocol_PingResult: Sendable {
   init() {}
 }
 
+/// RPCRequest is a remote procedure call handled by the application.
 struct Centrifugal_Centrifuge_Protocol_RPCRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Call payload.
   var data: Data = Data()
 
+  /// Optional method name to route the call.
   var method: String = String()
+
+  /// Per-call headers, forwarded by allow-list.
+  var headers: Dictionary<String,String> = [:]
+
+  /// Client request id (fits 53 bits); 0 = no dedup or ordering.
+  var msgID: UInt64 = 0
+
+  /// msg_ids whose replies were received.
+  var ack: [UInt64] = []
+
+  /// Resend after transport loss.
+  var retransmit: Bool = false
+
+  /// Run only after these msg_ids finished.
+  var after: [UInt64] = []
+
+  /// Updates caused by this call are not pushed to the caller.
+  var withoutUpdates: Bool = false
+
+  /// Cancel this msg_id; method and data are empty.
+  var cancel: UInt64 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
 
+/// RPCResult is the result of an RPC call.
 struct Centrifugal_Centrifuge_Protocol_RPCResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Result payload.
   var data: Data = Data()
+
+  /// Answered from the deduplication record.
+  var cached: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
 
+/// SendRequest is an asynchronous message from the client to the server
+/// handled by the application. No Reply is sent in response, so the command
+/// may have zero id.
 struct Centrifugal_Centrifuge_Protocol_SendRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Message payload.
   var data: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1250,6 +1789,8 @@ struct Centrifugal_Centrifuge_Protocol_SendRequest: Sendable {
   init() {}
 }
 
+/// FilterNode is a node of a publication tags filter expression tree, see
+/// SubscribeRequest.tf.
 struct Centrifugal_Centrifuge_Protocol_FilterNode: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1257,12 +1798,13 @@ struct Centrifugal_Centrifuge_Protocol_FilterNode: Sendable {
 
   /// Operation type for this node:
   /// - "" (empty string) → leaf node (comparison)
-  /// - "and" → logical AND of child nodes
-  /// - "or"  → logical OR of child nodes
+  /// - "and" → logical AND of child nodes (at least one)
+  /// - "or"  → logical OR of child nodes (at least one)
   /// - "not" → logical NOT of a single child node
   var op: String = String()
 
-  /// Key for comparison (only valid for leaf nodes).
+  /// Tag key for comparison (only valid for leaf nodes). Required for all
+  /// comparisons except "ex" and "nex".
   var key: String = String()
 
   /// Comparison operator for leaf nodes.
@@ -1281,12 +1823,18 @@ struct Centrifugal_Centrifuge_Protocol_FilterNode: Sendable {
   ///   "lte"  → numeric less than or equal val
   ///   "gt"   → numeric greater than val
   ///   "gte"  → numeric greater than or equal val
+  ///
+  /// A missing tag never matches eq, sw, ew, ct and numeric comparisons, and
+  /// always matches neq. For in and nin a missing tag is compared as an empty
+  /// string. Numeric comparisons parse both sides as decimal numbers and do not
+  /// match when either side is not a number.
   var cmp: String = String()
 
-  /// Single value used in most comparisons (e.g. "eq").
+  /// Single value used in most comparisons (e.g. "eq"). Required for all
+  /// comparisons except "in", "nin", "ex" and "nex".
   var val: String = String()
 
-  /// Multiple values used for set comparisons ("in", "nin").
+  /// Multiple values used for set comparisons ("in", "nin"), required for them.
   var vals: [String] = []
 
   /// Child nodes.
@@ -1304,7 +1852,7 @@ fileprivate let _protobuf_package = "centrifugal.centrifuge.protocol"
 
 extension Centrifugal_Centrifuge_Protocol_Error: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Error"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}message\0\u{1}temporary\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}message\0\u{1}temporary\0\u{4}e\u{f}app_code\0\u{3}app_type\0\u{1}metadata\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1315,6 +1863,9 @@ extension Centrifugal_Centrifuge_Protocol_Error: SwiftProtobuf.Message, SwiftPro
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.code) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.message) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.temporary) }()
+      case 1000: try { try decoder.decodeSingularInt32Field(value: &self.appCode) }()
+      case 1001: try { try decoder.decodeSingularStringField(value: &self.appType) }()
+      case 1002: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.metadata) }()
       default: break
       }
     }
@@ -1330,6 +1881,15 @@ extension Centrifugal_Centrifuge_Protocol_Error: SwiftProtobuf.Message, SwiftPro
     if self.temporary != false {
       try visitor.visitSingularBoolField(value: self.temporary, fieldNumber: 3)
     }
+    if self.appCode != 0 {
+      try visitor.visitSingularInt32Field(value: self.appCode, fieldNumber: 1000)
+    }
+    if !self.appType.isEmpty {
+      try visitor.visitSingularStringField(value: self.appType, fieldNumber: 1001)
+    }
+    if !self.metadata.isEmpty {
+      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.metadata, fieldNumber: 1002)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1337,6 +1897,9 @@ extension Centrifugal_Centrifuge_Protocol_Error: SwiftProtobuf.Message, SwiftPro
     if lhs.code != rhs.code {return false}
     if lhs.message != rhs.message {return false}
     if lhs.temporary != rhs.temporary {return false}
+    if lhs.appCode != rhs.appCode {return false}
+    if lhs.appType != rhs.appType {return false}
+    if lhs.metadata != rhs.metadata {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1538,7 +2101,7 @@ extension Centrifugal_Centrifuge_Protocol_Command: SwiftProtobuf.Message, SwiftP
 
 extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Reply"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}error\0\u{2}\u{2}push\0\u{1}connect\0\u{1}subscribe\0\u{1}unsubscribe\0\u{1}publish\0\u{1}presence\0\u{3}presence_stats\0\u{1}history\0\u{1}ping\0\u{1}rpc\0\u{1}refresh\0\u{3}sub_refresh\0\u{c}\u{3}\u{1}")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}error\0\u{2}\u{2}push\0\u{1}connect\0\u{1}subscribe\0\u{1}unsubscribe\0\u{1}publish\0\u{1}presence\0\u{3}presence_stats\0\u{1}history\0\u{1}ping\0\u{1}rpc\0\u{1}refresh\0\u{3}sub_refresh\0\u{2}Y\u{f}time\0\u{c}\u{3}\u{1}")
 
   fileprivate class _StorageClass {
     var _id: UInt32 = 0
@@ -1555,6 +2118,7 @@ extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftPro
     var _rpc: Centrifugal_Centrifuge_Protocol_RPCResult? = nil
     var _refresh: Centrifugal_Centrifuge_Protocol_RefreshResult? = nil
     var _subRefresh: Centrifugal_Centrifuge_Protocol_SubRefreshResult? = nil
+    var _time: Int64 = 0
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1579,6 +2143,7 @@ extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftPro
       _rpc = source._rpc
       _refresh = source._refresh
       _subRefresh = source._subRefresh
+      _time = source._time
     }
   }
 
@@ -1611,6 +2176,7 @@ extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftPro
         case 13: try { try decoder.decodeSingularMessageField(value: &_storage._rpc) }()
         case 14: try { try decoder.decodeSingularMessageField(value: &_storage._refresh) }()
         case 15: try { try decoder.decodeSingularMessageField(value: &_storage._subRefresh) }()
+        case 1000: try { try decoder.decodeSingularInt64Field(value: &_storage._time) }()
         default: break
         }
       }
@@ -1665,6 +2231,9 @@ extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftPro
       try { if let v = _storage._subRefresh {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
       } }()
+      if _storage._time != 0 {
+        try visitor.visitSingularInt64Field(value: _storage._time, fieldNumber: 1000)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1688,6 +2257,7 @@ extension Centrifugal_Centrifuge_Protocol_Reply: SwiftProtobuf.Message, SwiftPro
         if _storage._rpc != rhs_storage._rpc {return false}
         if _storage._refresh != rhs_storage._refresh {return false}
         if _storage._subRefresh != rhs_storage._subRefresh {return false}
+        if _storage._time != rhs_storage._time {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -1832,6 +2402,46 @@ extension Centrifugal_Centrifuge_Protocol_Push: SwiftProtobuf.Message, SwiftProt
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Centrifugal_Centrifuge_Protocol_Dictionary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".Dictionary"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}data\0\u{3}data_b64\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.dataB64) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 2)
+    }
+    if !self.dataB64.isEmpty {
+      try visitor.visitSingularStringField(value: self.dataB64, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Centrifugal_Centrifuge_Protocol_Dictionary, rhs: Centrifugal_Centrifuge_Protocol_Dictionary) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.dataB64 != rhs.dataB64 {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2316,7 +2926,7 @@ extension Centrifugal_Centrifuge_Protocol_Refresh: SwiftProtobuf.Message, SwiftP
 
 extension Centrifugal_Centrifuge_Protocol_ConnectRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConnectRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}data\0\u{1}subs\0\u{1}name\0\u{1}version\0\u{1}headers\0\u{1}flag\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}data\0\u{1}subs\0\u{1}name\0\u{1}version\0\u{1}headers\0\u{1}flag\0\u{1}dict\0\u{1}profile\0\u{2}_\u{f}instance\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2331,6 +2941,9 @@ extension Centrifugal_Centrifuge_Protocol_ConnectRequest: SwiftProtobuf.Message,
       case 5: try { try decoder.decodeSingularStringField(value: &self.version) }()
       case 6: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.headers) }()
       case 7: try { try decoder.decodeSingularInt64Field(value: &self.flag) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.dict) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.profile) }()
+      case 1000: try { try decoder.decodeSingularStringField(value: &self.instance) }()
       default: break
       }
     }
@@ -2358,6 +2971,15 @@ extension Centrifugal_Centrifuge_Protocol_ConnectRequest: SwiftProtobuf.Message,
     if self.flag != 0 {
       try visitor.visitSingularInt64Field(value: self.flag, fieldNumber: 7)
     }
+    if !self.dict.isEmpty {
+      try visitor.visitSingularStringField(value: self.dict, fieldNumber: 8)
+    }
+    if !self.profile.isEmpty {
+      try visitor.visitSingularStringField(value: self.profile, fieldNumber: 9)
+    }
+    if !self.instance.isEmpty {
+      try visitor.visitSingularStringField(value: self.instance, fieldNumber: 1000)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2369,6 +2991,9 @@ extension Centrifugal_Centrifuge_Protocol_ConnectRequest: SwiftProtobuf.Message,
     if lhs.version != rhs.version {return false}
     if lhs.headers != rhs.headers {return false}
     if lhs.flag != rhs.flag {return false}
+    if lhs.profile != rhs.profile {return false}
+    if lhs.dict != rhs.dict {return false}
+    if lhs.instance != rhs.instance {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2376,79 +3001,167 @@ extension Centrifugal_Centrifuge_Protocol_ConnectRequest: SwiftProtobuf.Message,
 
 extension Centrifugal_Centrifuge_Protocol_ConnectResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConnectResult"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}client\0\u{1}version\0\u{1}expires\0\u{1}ttl\0\u{1}data\0\u{1}subs\0\u{1}ping\0\u{1}pong\0\u{1}session\0\u{1}node\0\u{1}time\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}client\0\u{1}version\0\u{1}expires\0\u{1}ttl\0\u{1}data\0\u{1}subs\0\u{1}ping\0\u{1}pong\0\u{1}session\0\u{1}node\0\u{1}time\0\u{1}flag\0\u{1}dict\0\u{2}[\u{f}user\0\u{3}auth_class\0")
+
+  fileprivate class _StorageClass {
+    var _client: String = String()
+    var _version: String = String()
+    var _expires: Bool = false
+    var _ttl: UInt32 = 0
+    var _data: Data = Data()
+    var _subs: Dictionary<String,Centrifugal_Centrifuge_Protocol_SubscribeResult> = [:]
+    var _ping: UInt32 = 0
+    var _pong: Bool = false
+    var _session: String = String()
+    var _node: String = String()
+    var _time: Int64 = 0
+    var _flag: Int64 = 0
+    var _dict: Centrifugal_Centrifuge_Protocol_Dictionary? = nil
+    var _user: String = String()
+    var _authClass: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _client = source._client
+      _version = source._version
+      _expires = source._expires
+      _ttl = source._ttl
+      _data = source._data
+      _subs = source._subs
+      _ping = source._ping
+      _pong = source._pong
+      _session = source._session
+      _node = source._node
+      _time = source._time
+      _flag = source._flag
+      _dict = source._dict
+      _user = source._user
+      _authClass = source._authClass
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.client) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.version) }()
-      case 3: try { try decoder.decodeSingularBoolField(value: &self.expires) }()
-      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.ttl) }()
-      case 5: try { try decoder.decodeSingularBytesField(value: &self.data) }()
-      case 6: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMessageMap<SwiftProtobuf.ProtobufString,Centrifugal_Centrifuge_Protocol_SubscribeResult>.self, value: &self.subs) }()
-      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.ping) }()
-      case 8: try { try decoder.decodeSingularBoolField(value: &self.pong) }()
-      case 9: try { try decoder.decodeSingularStringField(value: &self.session) }()
-      case 10: try { try decoder.decodeSingularStringField(value: &self.node) }()
-      case 11: try { try decoder.decodeSingularInt64Field(value: &self.time) }()
-      default: break
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._client) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._version) }()
+        case 3: try { try decoder.decodeSingularBoolField(value: &_storage._expires) }()
+        case 4: try { try decoder.decodeSingularUInt32Field(value: &_storage._ttl) }()
+        case 5: try { try decoder.decodeSingularBytesField(value: &_storage._data) }()
+        case 6: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMessageMap<SwiftProtobuf.ProtobufString,Centrifugal_Centrifuge_Protocol_SubscribeResult>.self, value: &_storage._subs) }()
+        case 7: try { try decoder.decodeSingularUInt32Field(value: &_storage._ping) }()
+        case 8: try { try decoder.decodeSingularBoolField(value: &_storage._pong) }()
+        case 9: try { try decoder.decodeSingularStringField(value: &_storage._session) }()
+        case 10: try { try decoder.decodeSingularStringField(value: &_storage._node) }()
+        case 11: try { try decoder.decodeSingularInt64Field(value: &_storage._time) }()
+        case 12: try { try decoder.decodeSingularInt64Field(value: &_storage._flag) }()
+        case 13: try { try decoder.decodeSingularMessageField(value: &_storage._dict) }()
+        case 1000: try { try decoder.decodeSingularStringField(value: &_storage._user) }()
+        case 1001: try { try decoder.decodeSingularStringField(value: &_storage._authClass) }()
+        default: break
+        }
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.client.isEmpty {
-      try visitor.visitSingularStringField(value: self.client, fieldNumber: 1)
-    }
-    if !self.version.isEmpty {
-      try visitor.visitSingularStringField(value: self.version, fieldNumber: 2)
-    }
-    if self.expires != false {
-      try visitor.visitSingularBoolField(value: self.expires, fieldNumber: 3)
-    }
-    if self.ttl != 0 {
-      try visitor.visitSingularUInt32Field(value: self.ttl, fieldNumber: 4)
-    }
-    if !self.data.isEmpty {
-      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 5)
-    }
-    if !self.subs.isEmpty {
-      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMessageMap<SwiftProtobuf.ProtobufString,Centrifugal_Centrifuge_Protocol_SubscribeResult>.self, value: self.subs, fieldNumber: 6)
-    }
-    if self.ping != 0 {
-      try visitor.visitSingularUInt32Field(value: self.ping, fieldNumber: 7)
-    }
-    if self.pong != false {
-      try visitor.visitSingularBoolField(value: self.pong, fieldNumber: 8)
-    }
-    if !self.session.isEmpty {
-      try visitor.visitSingularStringField(value: self.session, fieldNumber: 9)
-    }
-    if !self.node.isEmpty {
-      try visitor.visitSingularStringField(value: self.node, fieldNumber: 10)
-    }
-    if self.time != 0 {
-      try visitor.visitSingularInt64Field(value: self.time, fieldNumber: 11)
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._client.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._client, fieldNumber: 1)
+      }
+      if !_storage._version.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._version, fieldNumber: 2)
+      }
+      if _storage._expires != false {
+        try visitor.visitSingularBoolField(value: _storage._expires, fieldNumber: 3)
+      }
+      if _storage._ttl != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._ttl, fieldNumber: 4)
+      }
+      if !_storage._data.isEmpty {
+        try visitor.visitSingularBytesField(value: _storage._data, fieldNumber: 5)
+      }
+      if !_storage._subs.isEmpty {
+        try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMessageMap<SwiftProtobuf.ProtobufString,Centrifugal_Centrifuge_Protocol_SubscribeResult>.self, value: _storage._subs, fieldNumber: 6)
+      }
+      if _storage._ping != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._ping, fieldNumber: 7)
+      }
+      if _storage._pong != false {
+        try visitor.visitSingularBoolField(value: _storage._pong, fieldNumber: 8)
+      }
+      if !_storage._session.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._session, fieldNumber: 9)
+      }
+      if !_storage._node.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._node, fieldNumber: 10)
+      }
+      if _storage._time != 0 {
+        try visitor.visitSingularInt64Field(value: _storage._time, fieldNumber: 11)
+      }
+      if _storage._flag != 0 {
+        try visitor.visitSingularInt64Field(value: _storage._flag, fieldNumber: 12)
+      }
+      try { if let v = _storage._dict {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      } }()
+      if !_storage._user.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._user, fieldNumber: 1000)
+      }
+      if !_storage._authClass.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._authClass, fieldNumber: 1001)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Centrifugal_Centrifuge_Protocol_ConnectResult, rhs: Centrifugal_Centrifuge_Protocol_ConnectResult) -> Bool {
-    if lhs.client != rhs.client {return false}
-    if lhs.version != rhs.version {return false}
-    if lhs.expires != rhs.expires {return false}
-    if lhs.ttl != rhs.ttl {return false}
-    if lhs.data != rhs.data {return false}
-    if lhs.subs != rhs.subs {return false}
-    if lhs.ping != rhs.ping {return false}
-    if lhs.pong != rhs.pong {return false}
-    if lhs.session != rhs.session {return false}
-    if lhs.node != rhs.node {return false}
-    if lhs.time != rhs.time {return false}
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._client != rhs_storage._client {return false}
+        if _storage._version != rhs_storage._version {return false}
+        if _storage._expires != rhs_storage._expires {return false}
+        if _storage._ttl != rhs_storage._ttl {return false}
+        if _storage._data != rhs_storage._data {return false}
+        if _storage._subs != rhs_storage._subs {return false}
+        if _storage._ping != rhs_storage._ping {return false}
+        if _storage._pong != rhs_storage._pong {return false}
+        if _storage._session != rhs_storage._session {return false}
+        if _storage._node != rhs_storage._node {return false}
+        if _storage._time != rhs_storage._time {return false}
+        if _storage._flag != rhs_storage._flag {return false}
+        if _storage._dict != rhs_storage._dict {return false}
+        if _storage._user != rhs_storage._user {return false}
+        if _storage._authClass != rhs_storage._authClass {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2486,7 +3199,7 @@ extension Centrifugal_Centrifuge_Protocol_RefreshRequest: SwiftProtobuf.Message,
 
 extension Centrifugal_Centrifuge_Protocol_RefreshResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RefreshResult"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}client\0\u{1}version\0\u{1}expires\0\u{1}ttl\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}client\0\u{1}version\0\u{1}expires\0\u{1}ttl\0\u{2}d\u{f}user\0\u{3}auth_class\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2498,6 +3211,8 @@ extension Centrifugal_Centrifuge_Protocol_RefreshResult: SwiftProtobuf.Message, 
       case 2: try { try decoder.decodeSingularStringField(value: &self.version) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.expires) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.ttl) }()
+      case 1000: try { try decoder.decodeSingularStringField(value: &self.user) }()
+      case 1001: try { try decoder.decodeSingularStringField(value: &self.authClass) }()
       default: break
       }
     }
@@ -2516,6 +3231,12 @@ extension Centrifugal_Centrifuge_Protocol_RefreshResult: SwiftProtobuf.Message, 
     if self.ttl != 0 {
       try visitor.visitSingularUInt32Field(value: self.ttl, fieldNumber: 4)
     }
+    if !self.user.isEmpty {
+      try visitor.visitSingularStringField(value: self.user, fieldNumber: 1000)
+    }
+    if !self.authClass.isEmpty {
+      try visitor.visitSingularStringField(value: self.authClass, fieldNumber: 1001)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2524,6 +3245,8 @@ extension Centrifugal_Centrifuge_Protocol_RefreshResult: SwiftProtobuf.Message, 
     if lhs.version != rhs.version {return false}
     if lhs.expires != rhs.expires {return false}
     if lhs.ttl != rhs.ttl {return false}
+    if lhs.user != rhs.user {return false}
+    if lhs.authClass != rhs.authClass {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3456,7 +4179,7 @@ extension Centrifugal_Centrifuge_Protocol_PingResult: SwiftProtobuf.Message, Swi
 
 extension Centrifugal_Centrifuge_Protocol_RPCRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RPCRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0\u{1}method\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0\u{1}method\0\u{2}f\u{f}headers\0\u{3}msg_id\0\u{1}ack\0\u{1}retransmit\0\u{1}after\0\u{3}without_updates\0\u{1}cancel\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3466,6 +4189,13 @@ extension Centrifugal_Centrifuge_Protocol_RPCRequest: SwiftProtobuf.Message, Swi
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBytesField(value: &self.data) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.method) }()
+      case 1000: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.headers) }()
+      case 1001: try { try decoder.decodeSingularUInt64Field(value: &self.msgID) }()
+      case 1002: try { try decoder.decodeRepeatedUInt64Field(value: &self.ack) }()
+      case 1003: try { try decoder.decodeSingularBoolField(value: &self.retransmit) }()
+      case 1004: try { try decoder.decodeRepeatedUInt64Field(value: &self.after) }()
+      case 1005: try { try decoder.decodeSingularBoolField(value: &self.withoutUpdates) }()
+      case 1006: try { try decoder.decodeSingularUInt64Field(value: &self.cancel) }()
       default: break
       }
     }
@@ -3478,12 +4208,40 @@ extension Centrifugal_Centrifuge_Protocol_RPCRequest: SwiftProtobuf.Message, Swi
     if !self.method.isEmpty {
       try visitor.visitSingularStringField(value: self.method, fieldNumber: 2)
     }
+    if !self.headers.isEmpty {
+      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.headers, fieldNumber: 1000)
+    }
+    if self.msgID != 0 {
+      try visitor.visitSingularUInt64Field(value: self.msgID, fieldNumber: 1001)
+    }
+    if !self.ack.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.ack, fieldNumber: 1002)
+    }
+    if self.retransmit != false {
+      try visitor.visitSingularBoolField(value: self.retransmit, fieldNumber: 1003)
+    }
+    if !self.after.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.after, fieldNumber: 1004)
+    }
+    if self.withoutUpdates != false {
+      try visitor.visitSingularBoolField(value: self.withoutUpdates, fieldNumber: 1005)
+    }
+    if self.cancel != 0 {
+      try visitor.visitSingularUInt64Field(value: self.cancel, fieldNumber: 1006)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Centrifugal_Centrifuge_Protocol_RPCRequest, rhs: Centrifugal_Centrifuge_Protocol_RPCRequest) -> Bool {
     if lhs.data != rhs.data {return false}
     if lhs.method != rhs.method {return false}
+    if lhs.headers != rhs.headers {return false}
+    if lhs.msgID != rhs.msgID {return false}
+    if lhs.ack != rhs.ack {return false}
+    if lhs.retransmit != rhs.retransmit {return false}
+    if lhs.after != rhs.after {return false}
+    if lhs.withoutUpdates != rhs.withoutUpdates {return false}
+    if lhs.cancel != rhs.cancel {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3491,7 +4249,7 @@ extension Centrifugal_Centrifuge_Protocol_RPCRequest: SwiftProtobuf.Message, Swi
 
 extension Centrifugal_Centrifuge_Protocol_RPCResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RPCResult"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0\u{2}g\u{f}cached\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3500,6 +4258,7 @@ extension Centrifugal_Centrifuge_Protocol_RPCResult: SwiftProtobuf.Message, Swif
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      case 1000: try { try decoder.decodeSingularBoolField(value: &self.cached) }()
       default: break
       }
     }
@@ -3509,11 +4268,15 @@ extension Centrifugal_Centrifuge_Protocol_RPCResult: SwiftProtobuf.Message, Swif
     if !self.data.isEmpty {
       try visitor.visitSingularBytesField(value: self.data, fieldNumber: 1)
     }
+    if self.cached != false {
+      try visitor.visitSingularBoolField(value: self.cached, fieldNumber: 1000)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Centrifugal_Centrifuge_Protocol_RPCResult, rhs: Centrifugal_Centrifuge_Protocol_RPCResult) -> Bool {
     if lhs.data != rhs.data {return false}
+    if lhs.cached != rhs.cached {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
