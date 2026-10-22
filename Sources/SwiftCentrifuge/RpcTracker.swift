@@ -85,8 +85,9 @@ private struct Route {
 
 
 internal final class RpcTracker {
-    // Set by `bind` in the client's initializer, before any call can arrive.
-    private weak var client: CentrifugeClient!
+    // Set by `bind` in the client's initializer, before any call can arrive. Weak, because the client
+    // owns the tracker. Nil once the client is released: every entry point and timer then does nothing.
+    private weak var client: CentrifugeClient?
     private var connected: Bool = false
     private var capable: Bool = false
     private var generator: MsgIdGenerator? = nil
@@ -101,6 +102,14 @@ internal final class RpcTracker {
 
 
     internal init() {
+    }
+
+
+    /// The tracker is released with its client. Its pending deadline item is cancelled, so nothing
+    /// stays scheduled for a dead client. A running timer holds the tracker strongly, so the tracker
+    /// is never released in the middle of one.
+    deinit {
+        self.timerItem?.cancel()
     }
 
 
@@ -125,29 +134,32 @@ internal final class RpcTracker {
         completion: @escaping (Result<CentrifugeRpcResult, Error>) -> Void,
         slot: RpcCallSlot
     ) {
-        if let configError: CentrifugeError = self.client.configError {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
+        if let configError: CentrifugeError = client.configError {
             completion(.failure(configError))
             return
         }
-        let limit: TimeInterval = self.client.config.timeout
+        let limit: TimeInterval = client.config.timeout
         if let explicit: TimeInterval = options.timeout, !(explicit > 0 && explicit <= limit) {
             completion(.failure(CentrifugeError.configurationError(message: "rpc timeout must be above 0 and no more than the client timeout")))
             return
         }
-        if self.client.state == .disconnected {
+        if client.state == .disconnected {
             completion(.failure(CentrifugeError.clientDisconnected))
             return
         }
-        let counted: Bool = self.client.config.instance != nil
+        let counted: Bool = client.config.instance != nil
         if counted {
-            if self.inFlight >= self.client.config.maxPendingRpc {
+            if self.inFlight >= client.config.maxPendingRpc {
                 completion(.failure(CentrifugeError.replyError(code: 16, message: "limit exceeded", temporary: false)))
                 return
             }
             self.inFlight += 1
         }
         let timeout: TimeInterval = options.timeout ?? limit
-        let deadline: UInt64 = self.client.clock.monotonicNanos() + clientNanos(timeout)
+        let deadline: UInt64 = client.clock.monotonicNanos() + clientNanos(timeout)
         self.lastSeq += 1
         let call: TrackedRpc = TrackedRpc(
             seq: self.lastSeq,
@@ -170,6 +182,9 @@ internal final class RpcTracker {
     /// Cancels a call on the client's queue. A call not on the wire fails at once; a sent call gets
     /// a cancel command for the server, and keeps its route for the late reply.
     internal func cancelCall(_ call: TrackedRpc?) {
+        guard self.client != nil else {
+            return
+        }
         guard let target: TrackedRpc = call else {
             return
         }
@@ -181,6 +196,9 @@ internal final class RpcTracker {
     /// The client's connection is confirmed: flushes the pending cancels and the waiting calls.
     /// `capable` is whether the server confirmed the RPC options.
     internal func onConnected(capable: Bool) {
+        guard self.client != nil else {
+            return
+        }
         self.connected = true
         self.capable = capable
         if capable {
@@ -200,6 +218,9 @@ internal final class RpcTracker {
     /// The transport is gone. Sent calls wait for the next connection (a plain call fails). A
     /// terminal disconnect fails every waiting call and drops the acks; the pending cancels stay.
     internal func onTransportLost(terminal: Bool) {
+        guard self.client != nil else {
+            return
+        }
         self.connected = false
         self.capable = false
         let lost: [Route] = Array(self.routes.values)
@@ -240,6 +261,9 @@ internal final class RpcTracker {
 
     /// Takes a reply of a command the tracker wrote. The client calls it only for ids `owns` reports.
     internal func handleReply(_ reply: Centrifugal_Centrifuge_Protocol_Reply) {
+        guard self.client != nil else {
+            return
+        }
         guard let route: Route = self.routes.removeValue(forKey: reply.id) else {
             return
         }
@@ -277,10 +301,13 @@ internal final class RpcTracker {
     /// Writes a queued call on the connected transport: a tracked call with its msg_id, or a plain
     /// call. A call that the connection cannot carry fails here.
     private func writeCall(_ call: TrackedRpc) {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         guard call.phase == .queued else {
             return
         }
-        let tracked: Bool = self.capable && self.client.config.instance != nil
+        let tracked: Bool = self.capable && client.config.instance != nil
         if !tracked {
             if !self.capable && call.everSent {
                 // Written on a lost connection, which cannot resend it.
@@ -297,7 +324,7 @@ internal final class RpcTracker {
         }
         if tracked && call.msgID == 0 {
             do {
-                call.msgID = try self.nextMsgID()
+                call.msgID = try self.nextMsgID(client: client)
             } catch {
                 self.settle(call, .failure(error))
                 return
@@ -312,7 +339,7 @@ internal final class RpcTracker {
             request.retransmit = call.retransmit
         }
         do {
-            let id: UInt32 = try self.transmit(request: request, call: call, msgID: call.msgID, isCancel: false)
+            let id: UInt32 = try self.transmit(client: client, request: request, call: call, msgID: call.msgID, isCancel: false)
             call.commandId = id
             call.phase = .sent
             call.everSent = true
@@ -325,6 +352,7 @@ internal final class RpcTracker {
     /// Writes one rpc or cancel command with the pending acks, and routes its reply. Throws when the
     /// command cannot be encoded; then nothing is written and the acks stay pending.
     private func transmit(
+        client: CentrifugeClient,
         request: Centrifugal_Centrifuge_Protocol_RPCRequest,
         call: TrackedRpc?,
         msgID: UInt64,
@@ -334,11 +362,11 @@ internal final class RpcTracker {
         rpc.ack = self.pendingAcks
         var command: Centrifugal_Centrifuge_Protocol_Command = Centrifugal_Centrifuge_Protocol_Command()
         command.rpc = rpc
-        let id: UInt32 = try self.client.writeTrackedCommand(&command)
+        let id: UInt32 = try client.writeTrackedCommand(&command)
         self.pendingAcks = []
         var expiry: UInt64? = nil
         if isCancel {
-            expiry = self.client.clock.monotonicNanos() + clientNanos(self.client.config.timeout)
+            expiry = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
         }
         self.routes[id] = Route(call: call, msgID: msgID, isCancel: isCancel, expiry: expiry)
         return id
@@ -347,6 +375,9 @@ internal final class RpcTracker {
 
     /// Sends a cancel command for a msg_id now, or keeps it for the next capable connection.
     private func sendCancel(_ msgID: UInt64) {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         guard self.connected && self.capable else {
             self.addPendingCancel(msgID)
             return
@@ -354,7 +385,7 @@ internal final class RpcTracker {
         var request: Centrifugal_Centrifuge_Protocol_RPCRequest = Centrifugal_Centrifuge_Protocol_RPCRequest()
         request.cancel = msgID
         do {
-            _ = try self.transmit(request: request, call: nil, msgID: msgID, isCancel: true)
+            _ = try self.transmit(client: client, request: request, call: nil, msgID: msgID, isCancel: true)
         } catch {
             self.addPendingCancel(msgID)
         }
@@ -363,8 +394,11 @@ internal final class RpcTracker {
 
     /// Keeps a cancel for the next capable connection. When the bound is full, the oldest goes.
     private func addPendingCancel(_ msgID: UInt64) {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         self.pendingCancels.append(msgID)
-        let limit: Int = self.client.config.maxPendingRpc
+        let limit: Int = client.config.maxPendingRpc
         if self.pendingCancels.count > limit {
             self.pendingCancels.removeFirst(self.pendingCancels.count - limit)
         }
@@ -373,6 +407,9 @@ internal final class RpcTracker {
 
     /// Handles a refusal of a tracked call: a new msg_id at once, or a resend later with the same one.
     private func handleRetry(_ call: TrackedRpc, signal: RpcRetrySignal, error: Centrifugal_Centrifuge_Protocol_Error) {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         switch signal {
         case .newMsgID:
             guard call.newIdResends < maxNewIdResends else {
@@ -380,7 +417,7 @@ internal final class RpcTracker {
                 return
             }
             call.newIdResends += 1
-            self.generator?.resync(serverTimeMillis: self.client.serverTimeMillis())
+            self.generator?.resync(serverTimeMillis: client.serverTimeMillis())
             call.msgID = 0
             call.retransmit = false
             call.phase = .queued
@@ -390,7 +427,7 @@ internal final class RpcTracker {
                 self.settle(call, .failure(rpcErrorValue(error)))
                 return
             }
-            let now: UInt64 = self.client.clock.monotonicNanos()
+            let now: UInt64 = client.clock.monotonicNanos()
             guard call.deadline > now else {
                 // The deadline is already reached: no attempt can run before it (F8).
                 self.settle(call, .failure(CentrifugeError.timeout))
@@ -399,7 +436,7 @@ internal final class RpcTracker {
             let remaining: UInt64 = call.deadline - now
             let factor: UInt64 = UInt64(1) << UInt64(call.laterResends)
             let ceiling: UInt64 = min(laterResendBaseNanos * factor, remaining)
-            let delay: UInt64 = self.client.random.uniform(0 ... ceiling)
+            let delay: UInt64 = client.random.uniform(0 ... ceiling)
             call.laterResends += 1
             call.phase = .resendWait
             call.commandId = 0
@@ -436,11 +473,14 @@ internal final class RpcTracker {
 
     /// Keeps the route of a sent call for its late reply, for one call timeout.
     private func retainRoute(_ call: TrackedRpc) {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         guard call.commandId != 0, var route: Route = self.routes[call.commandId] else {
             return
         }
         route.call = nil
-        route.expiry = self.client.clock.monotonicNanos() + clientNanos(self.client.config.timeout)
+        route.expiry = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
         self.routes[call.commandId] = route
     }
 
@@ -460,11 +500,12 @@ internal final class RpcTracker {
 
 
     /// The msg_id of the next tracked write. The generator starts at the server time of its first use.
-    private func nextMsgID() throws -> UInt64 {
-        if self.generator == nil {
-            self.generator = MsgIdGenerator(now: self.client.serverTimeMillis(), random: self.client.random)
+    private func nextMsgID(client: CentrifugeClient) throws -> UInt64 {
+        var generator: MsgIdGenerator = self.generator ?? MsgIdGenerator(now: client.serverTimeMillis(), random: client.random)
+        defer {
+            self.generator = generator
         }
-        return try self.generator!.next(serverTimeMillis: self.client.serverTimeMillis())
+        return try generator.next(serverTimeMillis: client.serverTimeMillis())
     }
 
 
@@ -513,6 +554,9 @@ internal final class RpcTracker {
 
     /// Keeps the one timer at the earliest moment. It is re-armed only when that moment changes.
     private func armTimer() {
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
         let next: UInt64? = self.nextWakeNanos()
         if next == self.timerDue {
             return
@@ -523,22 +567,26 @@ internal final class RpcTracker {
         guard let due: UInt64 = next else {
             return
         }
-        let now: UInt64 = self.client.clock.monotonicNanos()
+        let now: UInt64 = client.clock.monotonicNanos()
         let delay: TimeInterval = due > now ? Double(due - now) / 1e9 : 0
         let item: DispatchWorkItem = DispatchWorkItem { [weak self] in
             self?.onTimer()
         }
         self.timerItem = item
         self.timerDue = due
-        self.client.scheduler.schedule(after: delay, lateGrace: true, item)
+        client.scheduler.schedule(after: delay, lateGrace: true, item)
     }
 
 
-    /// Runs what is due: the call deadlines, the later resends and the route expiries.
+    /// Runs what is due: the call deadlines, the later resends and the route expiries. A timer that
+    /// finds the client gone does nothing and does not re-arm.
     private func onTimer() {
         self.timerItem = nil
         self.timerDue = nil
-        let now: UInt64 = self.client.clock.monotonicNanos()
+        guard let client: CentrifugeClient = self.client else {
+            return
+        }
+        let now: UInt64 = client.clock.monotonicNanos()
         for call: TrackedRpc in self.sortedCalls() where call.phase != .settled {
             if call.deadline <= now {
                 self.finishLocally(call, error: CentrifugeError.timeout)

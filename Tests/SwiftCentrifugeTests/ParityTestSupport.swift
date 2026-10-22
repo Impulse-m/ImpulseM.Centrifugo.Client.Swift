@@ -89,16 +89,18 @@ func makeManualClient(
         config: config,
         delegate: delegate,
         clock: clock,
-        schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
+        schedulerFactory: { (queue: DispatchQueue, _: ClientClock) -> ClientScheduler in
+            // The factory receives the same clock as the client; the local one avoids a cast.
             let manual: ManualScheduler = ManualScheduler(
                 queue: queue,
-                clock: factoryClock as! ManualClock
+                clock: clock
             )
             holder.set(manual)
             return manual
         },
         random: random
     )
+    // The factory runs inside the client's initializer, so the holder is always filled by now.
     let scheduler: ManualScheduler = holder.current!
     return ManualClientSetup(client: client, clock: clock, scheduler: scheduler)
 }

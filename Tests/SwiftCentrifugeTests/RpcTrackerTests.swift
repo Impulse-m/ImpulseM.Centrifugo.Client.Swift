@@ -37,6 +37,12 @@ private struct Harness {
 }
 
 
+/// A weak handle on a client, so a test can check that the client was released.
+private struct WeakClient {
+    weak var client: CentrifugeClient?
+}
+
+
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class RpcTrackerTests: @unchecked Sendable {
     private let fake: FakeRpcServer
@@ -447,7 +453,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func aRefusedCallHoldsNoSlotOfTheBound() async {
+    @Test func aRefusedCallHoldsNoSlotOfTheBound() async throws {
         let waiting: (client: CentrifugeClient, delegate: RpcTestDelegate) = await waitingClient(config: instanceConfig())
         var handles: [(call: CentrifugeRpcCall, outcome: CallOutcome)] = []
         for _ in 0 ..< 32 {
@@ -457,8 +463,9 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: refused.outcome.done, within: 5)
 
         // One settled call frees one slot; the refused call took none, so the next call is admitted.
-        handles[0].call.cancel()
-        await fulfillment(of: handles[0].outcome.done, within: 5)
+        let firstHandle: (call: CentrifugeRpcCall, outcome: CallOutcome) = try #require(handles.first)
+        firstHandle.call.cancel()
+        await fulfillment(of: firstHandle.outcome.done, within: 5)
         let next: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(waiting.client)
         waiting.client.disconnect()
         await fulfillment(of: next.outcome.done, within: 5)
@@ -725,6 +732,44 @@ final class RpcTrackerTests: @unchecked Sendable {
             return command.hasRpc && command.rpc.cancel == msgID
         }
         #expect(cancelCommands().count == 1)
+    }
+
+
+    // MARK: released client
+
+    /// Starts a tracked call on a client that waits for its connection, so the call's deadline item is
+    /// pending. Returns once that item is armed, with the scheduler, the call's outcome and a weak
+    /// handle on the client. Every strong reference to the client lives in this function and ends with it.
+    private func startCallThenReleaseClient() async -> (scheduler: ManualScheduler, outcome: CallOutcome, weakClient: WeakClient) {
+        fake.server.connectResult = capabilityResult(true)
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasConnect
+        }
+        let delegate: RpcTestDelegate = RpcTestDelegate()
+        let setup: ManualClientSetup = makeManualClient(endpoint: fake.server.url, config: instanceConfig(timeout: 1), delegate: delegate)
+        setup.client.connect()
+        let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(setup.client)
+        // The client's queue runs in order: once this block has run, the admit of the call and its arming are done.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            setup.client.syncQueue.async {
+                continuation.resume()
+            }
+        }
+        return (setup.scheduler, call.outcome, WeakClient(client: setup.client))
+    }
+
+
+    /// Releases the client while its deadline item is pending, then runs the scheduler past the deadline.
+    /// The tracker is released with the client and cancels its item, so nothing runs and nothing traps.
+    /// The call's completion is never called: a client that is gone settles no call.
+    @Test func trackerTimerAfterTheClientIsReleasedDoesNotTrap() async throws {
+        let parts: (scheduler: ManualScheduler, outcome: CallOutcome, weakClient: WeakClient) = await startCallThenReleaseClient()
+        try #require(!parts.scheduler.scheduledCalls.isEmpty, "a timer was armed before the release")
+        try #require(parts.weakClient.client == nil, "the client was released")
+
+        await parts.scheduler.advance(by: 2)
+
+        #expect(parts.outcome.result == nil, "a call of a released client is never completed")
     }
 
 
