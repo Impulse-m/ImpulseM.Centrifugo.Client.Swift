@@ -93,7 +93,9 @@ public struct CentrifugeClientConfig {
         logger: CentrifugeLogger? = nil,
         tlsChallengeHandler: CentrifugeTLSChallengeHandler? = nil,
         instance: String? = nil,
-        maxPendingRpc: Int = 32
+        maxPendingRpc: Int = 32,
+        stopOnRefusedToken: Bool = true,
+        tokenRetryCap: TimeInterval = 300
     ) {
         self.timeout = timeout
         self.headers = headers
@@ -114,6 +116,8 @@ public struct CentrifugeClientConfig {
         self.tlsChallengeHandler = tlsChallengeHandler
         self.instance = instance
         self.maxPendingRpc = maxPendingRpc
+        self.stopOnRefusedToken = stopOnRefusedToken
+        self.tokenRetryCap = tokenRetryCap
     }
 
     /// Timeout for server responses and for opening the connection (the WebSocket
@@ -208,6 +212,15 @@ public struct CentrifugeClientConfig {
     /// least 1. A client without an instance has no bound.
     public var maxPendingRpc: Int
 
+    /// Whether a timer refresh whose fresh token is the one the server refused as expired (code 109) does not
+    /// send that token again. The connection is then left to expire, and the next connect asks the token getter.
+    /// Default true. Set it to false to resend the same token on each retry.
+    public var stopOnRefusedToken: Bool
+
+    /// The longest delay between two retries of a failed timer refresh, in seconds. The retry delay grows from
+    /// 10 to 20 seconds and doubles with each consecutive failure, up to this cap. Default 300.
+    public var tokenRetryCap: TimeInterval
+
 }
 
 /// A typealias for a provider that returns a custom `URLSessionConfiguration`.
@@ -263,10 +276,12 @@ public class CentrifugeClient: @unchecked Sendable {
     // rpc() fails with it. Nil for a usable configuration.
     internal let configError: CentrifugeError?
     internal let serverTimeOffset: ServerTimeOffset = ServerTimeOffset()
-    fileprivate var identity: ConnectionIdentity = ConnectionIdentity()
+    internal var identity: ConnectionIdentity = ConnectionIdentity()
     // The rpc calls: tracked and plain (RpcTracker.swift). Bound to this client at the end of
     // each initializer.
     internal let rpcTracker: RpcTracker = RpcTracker()
+    // The explicit refresh calls and the marks of the timer refreshes (Refresh.swift).
+    internal let refreshState: RefreshState = RefreshState()
     
     //MARK -
     fileprivate(set) var internalState: CentrifugeClientState = .disconnected
@@ -278,7 +293,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var transportId: UInt64 = 0
     fileprivate var openTimeoutTask: DispatchWorkItem?
     fileprivate var client: String?
-    fileprivate var token: String?
+    internal var token: String?
     fileprivate var data: Data?
     fileprivate var commandIds: CommandIdCounter = CommandIdCounter()
     fileprivate var commandIdLock: NSLock = NSLock()
@@ -295,7 +310,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var reconnectAttempts = 0
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
-    fileprivate var refreshRequired: Bool = false
+    internal var refreshRequired: Bool = false
     fileprivate var pingTimer: DispatchWorkItem?
     fileprivate var pingInterval: UInt32 = 0
     fileprivate var sendPong: Bool = false
@@ -628,33 +643,35 @@ internal extension CentrifugeClient {
             strongSelf.sendRefresh(token: token, completion: { [weak self] result, error in
                 guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
                 if let err = error {
+                    // The retry is armed (or the connection ends) before the callout: delegate callbacks
+                    // run inline and may re-enter the client.
                     defer {
                         strongSelf.delegate?.onError(
                             strongSelf,
                             CentrifugeErrorEvent(error: CentrifugeError.refreshError(error: err))
                         )
                     }
-                    switch err {
-                    case CentrifugeError.replyError(let code, let message, let temporary):
-                        if temporary {
-                            strongSelf.startConnectionRefresh(ttl: UInt32(floor(strongSelf.getBackoffDelay(step: 0, minDelay: 5, maxDelay: 10))))
-                            return
-                        } else {
-                            strongSelf.processDisconnect(code: code, reason: message, reconnect: false)
-                            return
-                        }
-                    default:
-                        strongSelf.startConnectionRefresh(ttl: UInt32(floor(strongSelf.getBackoffDelay(step: 0, minDelay: 5, maxDelay: 10))))
+                    guard case CentrifugeError.replyError(let code, let message, let temporary) = err else {
+                        strongSelf.scheduleTimerRefreshRetry()
                         return
                     }
+                    if refreshKeepsConnection(code: code) {
+                        return
+                    }
+                    if refreshRetries(code: code, temporary: temporary) {
+                        if code == refreshRefusedExpiredCode {
+                            strongSelf.refreshState.refusedToken = token
+                        }
+                        strongSelf.scheduleTimerRefreshRetry()
+                        return
+                    }
+                    strongSelf.processDisconnect(code: code, reason: message, reconnect: false)
+                    return
                 }
                 if let res = result {
-                    if strongSelf.identity.applyRefresh(user: res.user, authClass: res.authClass) {
-                        strongSelf.delegate?.onAuth(strongSelf, CentrifugeAuthEvent(user: strongSelf.identity.user, authClass: strongSelf.identity.authClass))
-                    }
-                    if res.expires {
-                        strongSelf.startConnectionRefresh(ttl: res.ttl)
-                    }
+                    strongSelf.refreshState.failures = 0
+                    strongSelf.refreshState.refusedToken = nil
+                    strongSelf.acceptRefreshReply(res)
                 }
             })
         }
@@ -1004,6 +1021,7 @@ fileprivate extension CentrifugeClient {
             // Queued calls go out here, before the delegate's onConnected. A call that this settles
             // (headers on a connection without the RPC options) completes before that event.
             self.rpcTracker.onConnected(capable: (result.flag & ConnectFlags.rpcOptions) != 0)
+            self.refreshConnected()
             self.reconnectAttempts = 0
             self.client = result.client
             self.identity.applyConnect(user: result.user, authClass: result.authClass)
@@ -1053,7 +1071,7 @@ fileprivate extension CentrifugeClient {
             
             // Periodically refresh connection token.
             if result.expires {
-                self.startConnectionRefresh(ttl: result.ttl)
+                self.startConnectionRefresh(after: Double(result.ttl))
             }
         }
     }
@@ -1334,7 +1352,7 @@ fileprivate extension CentrifugeClient {
         self.pingTimer?.cancel()
     }
     
-    private func startConnectionRefresh(ttl: UInt32) {
+    func startConnectionRefresh(after delay: TimeInterval) {
         // One refresh chain per connection: a new step replaces the pending one, and
         // the chain stops at its next step once the connection it was started for is
         // gone - a token request or refresh command still in flight across a
@@ -1349,12 +1367,23 @@ fileprivate extension CentrifugeClient {
             // and everything below - failUnauthorized (which runs processDisconnect,
             // asserted to be on syncQueue), the delegate callback, and rescheduling
             // the refresh - is only safe on syncQueue.
+            let generation: UInt64 = strongSelf.refreshState.generation
+            strongSelf.refreshState.timerFetchInFlight = true
             strongSelf.getConnectionToken(completion: { [weak self] result in
-                guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
+                guard let strongSelf = self else { return }
+                strongSelf.refreshState.timerFetchInFlight = false
+                // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
+                guard strongSelf.isCurrentConnection(transportId), strongSelf.refreshState.generation == generation else { return }
                 switch result {
                 case .success(let token):
                     if token == "" {
                         strongSelf.failUnauthorized();
+                        return
+                    }
+                    // A token the server refused as expired is not sent again (stopOnRefusedToken): the
+                    // connection is left to expire, and the next connect asks the getter.
+                    if refusedTokenIsNotResent(token: token, refused: strongSelf.refreshState.refusedToken, stopOnRefusedToken: strongSelf.config.stopOnRefusedToken) {
+                        strongSelf.refreshRequired = true
                         return
                     }
                     strongSelf.refreshWithToken(token: token, transportId: transportId)
@@ -1371,11 +1400,9 @@ fileprivate extension CentrifugeClient {
                     // Retry with backoff. Without rescheduling here a single failing
                     // token getter stops the refresh loop for the entire lifetime of
                     // the connection, and the server drops the client once the token
-                    // expires. Mirrors the subscription-level startSubscriptionRefresh,
-                    // and centrifuge-js/centrifuge-go, which both retry the same way.
-                    // Scheduled before the callout because delegate callbacks run
+                    // expires. Scheduled before the callout because delegate callbacks run
                     // inline and may re-enter the client.
-                    strongSelf.startConnectionRefresh(ttl: UInt32(floor(strongSelf.getBackoffDelay(step: 0, minDelay: 5, maxDelay: 10))))
+                    strongSelf.scheduleTimerRefreshRetry()
                     strongSelf.delegate?.onError(
                         strongSelf,
                         CentrifugeErrorEvent(error: CentrifugeError.tokenError(error: error))
@@ -1384,11 +1411,11 @@ fileprivate extension CentrifugeClient {
             })
         }
         
-        self.scheduleAfter(Double(ttl), refreshTask)
+        self.scheduleAfter(delay, refreshTask)
         self.refreshTask = refreshTask
     }
-    
-    private func stopConnectionRefresh() {
+
+    func stopConnectionRefresh() {
         self.refreshTask?.cancel()
     }
     
@@ -1471,6 +1498,8 @@ fileprivate extension CentrifugeClient {
             }
         }
         
+        // Explicit refresh calls waiting for the connection: a disconnect for good fails them.
+        self.refreshDisconnected(terminal: !reconnect)
         self.stopReconnect()
         self.stopWaitPing()
         self.stopConnectionRefresh()
@@ -1553,7 +1582,7 @@ fileprivate extension CentrifugeClient {
         })
     }
     
-    private func sendRefresh(token: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_RefreshResult?, Error?)->()) {
+    func sendRefresh(token: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_RefreshResult?, Error?)->()) {
         var req = Centrifugal_Centrifuge_Protocol_RefreshRequest()
         req.token = token
         

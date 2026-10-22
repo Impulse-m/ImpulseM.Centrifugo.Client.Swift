@@ -92,10 +92,17 @@ Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends th
 | 11 | `connectionClosed` | The connection was lost while the call was on it, and the call cannot be resent on the next one. |
 | 12 | `configurationError(message:)` | The configuration cannot work, for example an invalid instance or a `maxPendingRpc` below 1. |
 | 15 | `replyError(code: 15, ...)` | The call was not sent: the connection cannot carry what it asks for (headers). |
-| 16 | `replyError(code: 16, ...)` | The call was not sent: `maxPendingRpc` is reached. |
+| 16 | `replyError(code: 16, ...)` | The call was not sent: `maxPendingRpc` is reached, or 32 `refresh()` calls are in progress. |
 | 17 | `replyError(code: 17, ...)` | The call was cancelled with `cancel()`. |
 
 `clientRejected(code:message:)` carries the refusals the client makes itself, such as a closed rpc pool. It is never a server reply.
+
+## Connection token refresh
+
+- `refresh(token:completion:)` refreshes the connection token now. With a token it sends that token; without one it fetches it from `tokenGetter`. The completion gets a `CentrifugeRefreshResult` (`expires`, `ttl`, `user`, `authClass`) or the server's error, unchanged. A refused token is not kept: the previous one stays. A call made while disconnected waits for the next connection. Calls run one at a time; at most 32 are in progress, and a call beyond that fails with code 16. Without a token and without a `tokenGetter`, the call fails with `configurationError`.
+- A timer refresh that fails is retried with a fresh token when the server answers with a client error (code below 100), a temporary error, or code 109. The retry delay is 10 to 20 seconds at first and doubles with each consecutive failure, up to `CentrifugeClientConfig.tokenRetryCap` (default 300 seconds). The delay is drawn from 10 s plus a random part, as the Java SDK does. This changes the earlier fixed 5 to 10 second retry: the first retry now starts at 10 seconds.
+- A timer refresh refused with code 103 keeps the connection and its identity, and is not retried. Any other server error ends the connection with that code, without a reconnect.
+- With `CentrifugeClientConfig.stopOnRefusedToken` (default true), a retry that would send again the token the server refused as expired (109) is not sent. The connection is left to expire, and the next connect asks the token getter for a token. Set it to false to resend the same token.
 
 ## Usage in background
 

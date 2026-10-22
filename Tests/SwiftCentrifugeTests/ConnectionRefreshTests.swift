@@ -74,7 +74,9 @@ final class ConnectionRefreshTests: @unchecked Sendable {
         delegate.onErr = { e in
             if case CentrifugeError.tokenError = e.error { errored.fulfill() }
         }
-        let client = makeClient(delegate: delegate) { _, completion in
+        var cfg = CentrifugeClientConfig()
+        cfg.token = "initial"
+        cfg.tokenGetter = { _, completion in
             calls.lock(); callCount += 1; let n = callCount; calls.unlock()
             // Fail the first refresh, hand out a token on every later attempt.
             if n == 1 {
@@ -83,19 +85,35 @@ final class ConnectionRefreshTests: @unchecked Sendable {
                 completion(.success("refreshed-token"))
             }
         }
+        // The retry delay comes from the injected clock and random source: draw 0 gives its minimum, 10 s.
+        let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: cfg, delegate: delegate, random: ManualRandom(draw: 0))
         server.onCommand = { cmd in
             if cmd.hasRefresh { refreshed.fulfill() }
             return nil
         }
 
-        client.connect()
-        defer { client.disconnect() }
+        setup.client.connect()
+        defer { setup.client.disconnect() }
 
         await fulfillment(of: connected, within: 5)
+        // The connect handler arms the refresh timer after onConnected, on the same queue block.
+        await awaitSyncQueue(setup.client)
+        // The token expires after 1 s: the first refresh fails in the getter.
+        await setup.scheduler.advance(by: 1)
         await fulfillment(of: errored, within: 5)
-        // The retry is scheduled with backoff(step: 0, min: 5, max: 10) seconds.
-        await fulfillment(of: refreshed, within: 15)
+        // The retry is armed before the error is reported, so the advance finds it.
+        await setup.scheduler.advance(by: 10)
+        await fulfillment(of: refreshed, within: 5)
         #expect(server.received().last(where: { $0.hasRefresh })?.refresh.token == "refreshed-token")
+    }
+
+    /// Returns once every block enqueued on the client's queue before this call has run.
+    private func awaitSyncQueue(_ client: CentrifugeClient) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            client.syncQueue.async {
+                continuation.resume()
+            }
+        }
     }
 
     /// The token getter's completion is called by the app on whatever thread it
