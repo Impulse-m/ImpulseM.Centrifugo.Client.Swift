@@ -62,7 +62,7 @@ final class IdentityTests: @unchecked Sendable {
         let armed: Expectation = Expectation("next refresh armed")
         rescheduled.set(armed)
         await setup.scheduler.advance(by: 10)
-        await parityFulfillment(of: [armed], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [armed], within: 5)
         rescheduled.set(nil)
     }
 
@@ -82,7 +82,7 @@ final class IdentityTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate)
         setup.client.connect()
-        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [connected], within: 5)
         // onAuth follows onConnected on the same queue block; wait for that block to finish.
         await awaitSyncQueue(setup.client)
         #expect(delegate.authUsers == ["alice"], "one event at connect")

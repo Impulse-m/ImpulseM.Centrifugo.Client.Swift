@@ -87,7 +87,7 @@ final class FakeRpcServer: @unchecked Sendable {
         for _ in 0 ..< min(alreadyArrived, count) {
             expectation.fulfill()
         }
-        await parityFulfillment(of: expectation, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: expectation, within: 5)
     }
 
 

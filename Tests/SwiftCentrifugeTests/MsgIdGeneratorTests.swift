@@ -167,7 +167,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
             refusal = error
         }
         guard case .configurationError(let message)? = refusal else {
-            Issue.record("the id after 2^20 in the largest second is refused with configurationError", sourceLocation: #_sourceLocation)
+            Issue.record("the id after 2^20 in the largest second is refused with configurationError")
             return
         }
         #expect(message == "msg_id space exhausted")

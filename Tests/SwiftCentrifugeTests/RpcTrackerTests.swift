@@ -191,9 +191,9 @@ final class RpcTrackerTests: @unchecked Sendable {
     @Test func repliesAreAckedWithTheNextCall() async throws {
         let harness: Harness = await connectedHarness()
         let first: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: first.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: first.outcome.done, within: 5)
         let second: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: second.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: second.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 2)
@@ -230,7 +230,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
         dropping.set(false)
         await reconnect(harness, connectsSoFar: 1)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 2)
@@ -256,8 +256,8 @@ final class RpcTrackerTests: @unchecked Sendable {
 
         dropping.set(false)
         await reconnect(harness, connectsSoFar: 1)
-        await parityFulfillment(of: first.outcome.done, within: 5, sourceLocation: #_sourceLocation)
-        await parityFulfillment(of: second.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: first.outcome.done, within: 5)
+        await fulfillment(of: second.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 4)
@@ -284,7 +284,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await drain(harness)
         await harness.scheduler.advance(by: 1.5)
         await harness.delegate.awaitConnected(times: 2)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 1)
@@ -310,11 +310,11 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel != 0
         }
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 17)
         } else {
-            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))")
         }
 
         // The cancel gets no reply: after one call timeout its callbacks are dropped.
@@ -337,10 +337,10 @@ final class RpcTrackerTests: @unchecked Sendable {
         }
         await drain(harness)
         await harness.scheduler.advance(by: 1.1)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
         }
 
         let msgID: UInt64 = callCommands().first?.rpc.msgID ?? 0
@@ -382,11 +382,11 @@ final class RpcTrackerTests: @unchecked Sendable {
             return command.hasRpc && command.rpc.cancel == 0
         }
         call.call.cancel()
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 17)
         } else {
-            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))")
         }
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel != 0
@@ -427,7 +427,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         let afterReconnect: [UInt64] = Array(cancels.suffix(2)).map { (command: RpcCommand) -> UInt64 in command.rpc.cancel }
         #expect(lost.count == 3)
         #expect(afterReconnect == Array(lost.suffix(2)), "only the newest two cancels are kept")
-        await parityFulfillment(of: fourth.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: fourth.outcome.done, within: 5)
         #expect(succeeded(fourth.outcome.result))
     }
 
@@ -437,16 +437,16 @@ final class RpcTrackerTests: @unchecked Sendable {
     @Test func legacyServerGetsPlainCallsAndRejectsHeaders() async {
         let harness: Harness = await connectedHarness(capable: false)
         let plain: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: plain.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: plain.outcome.done, within: 5)
         #expect(succeeded(plain.outcome.result))
 
         let headers: CentrifugeRpcOptions = CentrifugeRpcOptions(headers: ["x-trace": "1"])
         let withHeaders: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client, options: headers)
-        await parityFulfillment(of: withHeaders.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: withHeaders.outcome.done, within: 5)
         if case CentrifugeError.replyError(let code, _, _)? = failure(withHeaders.outcome.result) {
             #expect(code == 15)
         } else {
-            Issue.record("expected unsupported (15), got \(String(describing: withHeaders.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected unsupported (15), got \(String(describing: withHeaders.outcome.result))")
         }
 
         let sent: [RpcCommand] = callCommands()
@@ -458,7 +458,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     @Test func capabilityWithoutInstanceSendsPlainCalls() async {
         let harness: Harness = await connectedHarness(config: instanceConfig(instance: nil))
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         #expect(succeeded(call.outcome.result))
         #expect(callCommands().first?.rpc.msgID == 0, "no msg_id without an instance")
     }
@@ -491,16 +491,16 @@ final class RpcTrackerTests: @unchecked Sendable {
             queued.append(startCall(waiting.client).outcome)
         }
         let refused: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(waiting.client)
-        await parityFulfillment(of: refused.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: refused.outcome.done, within: 5)
         if case CentrifugeError.replyError(let code, _, _)? = failure(refused.outcome.result) {
             #expect(code == 16)
         } else {
-            Issue.record("expected limit exceeded (16), got \(String(describing: refused.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected limit exceeded (16), got \(String(describing: refused.outcome.result))")
         }
 
         waiting.client.disconnect()
         for outcome: CallOutcome in queued {
-            await parityFulfillment(of: outcome.done, within: 5, sourceLocation: #_sourceLocation)
+            await fulfillment(of: outcome.done, within: 5)
         }
     }
 
@@ -512,21 +512,21 @@ final class RpcTrackerTests: @unchecked Sendable {
             handles.append(startCall(waiting.client))
         }
         let refused: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(waiting.client)
-        await parityFulfillment(of: refused.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: refused.outcome.done, within: 5)
 
         // One settled call frees one slot; the refused call took none, so the next call is admitted.
         let firstHandle: (call: CentrifugeRpcCall, outcome: CallOutcome) = try #require(handles.first)
         firstHandle.call.cancel()
-        await parityFulfillment(of: firstHandle.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: firstHandle.outcome.done, within: 5)
         let next: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(waiting.client)
         waiting.client.disconnect()
-        await parityFulfillment(of: next.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: next.outcome.done, within: 5)
         if case CentrifugeError.clientDisconnected? = failure(next.outcome.result) {
         } else {
-            Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))")
         }
         for handle: (call: CentrifugeRpcCall, outcome: CallOutcome) in handles.dropFirst() {
-            await parityFulfillment(of: handle.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+            await fulfillment(of: handle.outcome.done, within: 5)
         }
     }
 
@@ -541,7 +541,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         waiting.client.disconnect()
         var failedByDisconnect: Int = 0
         for outcome: CallOutcome in outcomes {
-            await parityFulfillment(of: outcome.done, within: 5, sourceLocation: #_sourceLocation)
+            await fulfillment(of: outcome.done, within: 5)
             if case CentrifugeError.clientDisconnected? = failure(outcome.result) {
                 failedByDisconnect += 1
             }
@@ -598,7 +598,7 @@ final class RpcTrackerTests: @unchecked Sendable {
             return reply
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 2)
@@ -616,13 +616,13 @@ final class RpcTrackerTests: @unchecked Sendable {
             return self.errorReply(code: 107, metadata: metadata)
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         #expect(callCommands().count == 3)
         if case CentrifugeError.replyErrorDetails(let details)? = failure(call.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueNewMsgID, "the error arrives unchanged")
         } else {
-            Issue.record("expected the server error, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected the server error, got \(String(describing: call.outcome.result))")
         }
     }
 
@@ -642,10 +642,10 @@ final class RpcTrackerTests: @unchecked Sendable {
             }
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: armed, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: armed, within: 5)
         await drain(harness)
         await harness.scheduler.advance(by: 0.25)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 2)
@@ -690,13 +690,13 @@ final class RpcTrackerTests: @unchecked Sendable {
         harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             barrier.record(result)
         }
-        await parityFulfillment(of: barrier.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: barrier.done, within: 5)
 
         await harness.scheduler.advance(by: 0.25)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
         }
         let methodCommands: [RpcCommand] = callCommands().filter { (command: RpcCommand) -> Bool in
             return command.rpc.method == "method"
@@ -739,16 +739,16 @@ final class RpcTrackerTests: @unchecked Sendable {
         harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             barrier.record(result)
         }
-        await parityFulfillment(of: barrier.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: barrier.done, within: 5)
 
         let expectedRange: ClosedRange<UInt64> = 0 ... 200_000_000
         #expect(random.requestedRanges.last == expectedRange, "the later resend is drawn over the remaining 200 ms, not 250 ms")
 
         await harness.scheduler.advance(by: 0.2)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
         }
     }
 
@@ -784,8 +784,8 @@ final class RpcTrackerTests: @unchecked Sendable {
         harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             barrier.record(result)
         }
-        await parityFulfillment(of: barrier.done, within: 5, sourceLocation: #_sourceLocation)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: barrier.done, within: 5)
+        await fulfillment(of: call.outcome.done, within: 5)
         return (outcome: call.outcome, sent: callCommands())
     }
 
@@ -795,7 +795,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyErrorDetails(let details)? = failure(result.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueNewMsgID, "the server error arrives unchanged")
         } else {
-            Issue.record("expected the server error, got \(String(describing: result.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected the server error, got \(String(describing: result.outcome.result))")
         }
         let methodCommands: [RpcCommand] = result.sent.filter { (command: RpcCommand) -> Bool in
             return command.rpc.method == "method"
@@ -809,7 +809,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyErrorDetails(let details)? = failure(result.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueLater, "the server error arrives unchanged")
         } else {
-            Issue.record("expected the server error, got \(String(describing: result.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected the server error, got \(String(describing: result.outcome.result))")
         }
         let methodCommands: [RpcCommand] = result.sent.filter { (command: RpcCommand) -> Bool in
             return command.rpc.method == "method"
@@ -839,17 +839,17 @@ final class RpcTrackerTests: @unchecked Sendable {
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         for expectation: Expectation in armed {
-            await parityFulfillment(of: expectation, within: 5, sourceLocation: #_sourceLocation)
+            await fulfillment(of: expectation, within: 5)
             await drain(harness)
             await harness.scheduler.advance(by: 0)
         }
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         #expect(callCommands().count == 4)
         if case CentrifugeError.replyErrorDetails(let details)? = failure(call.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueLater)
         } else {
-            Issue.record("expected the server error after the fourth refusal, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected the server error after the fourth refusal, got \(String(describing: call.outcome.result))")
         }
     }
 
@@ -860,12 +860,12 @@ final class RpcTrackerTests: @unchecked Sendable {
             return self.errorReply(code: 107, metadata: [:])
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
         #expect(callCommands().count == 1, "nothing is resent without the signal")
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 107)
         } else {
-            Issue.record("expected the server error, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected the server error, got \(String(describing: call.outcome.result))")
         }
     }
 
@@ -883,11 +883,11 @@ final class RpcTrackerTests: @unchecked Sendable {
             }
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
-        await parityFulfillment(of: armed, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: armed, within: 5)
 
         // The connection is lost while the resend waits: the call goes out with the reconnect.
         await reconnect(harness, connectsSoFar: 1)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
         try #require(sent.count == 2)
@@ -932,14 +932,14 @@ final class RpcTrackerTests: @unchecked Sendable {
         harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             barrier.record(result)
         }
-        await parityFulfillment(of: barrier.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: barrier.done, within: 5)
 
         await harness.scheduler.advance(by: 0.2)
-        await parityFulfillment(of: call.outcome.done, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: call.outcome.done, within: 5)
 
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
         }
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel != 0
@@ -998,11 +998,11 @@ final class RpcTrackerTests: @unchecked Sendable {
         let config: CentrifugeClientConfig = instanceConfig(maxPendingRpc: 0)
         do {
             _ = try CentrifugeClient.create(endpoint: "ws://127.0.0.1:1/connection/websocket", config: config)
-            Issue.record("create should refuse maxPendingRpc below 1", sourceLocation: #_sourceLocation)
+            Issue.record("create should refuse maxPendingRpc below 1")
         } catch {
             if case CentrifugeError.configurationError = error {
             } else {
-                Issue.record("expected configurationError, got \(error)", sourceLocation: #_sourceLocation)
+                Issue.record("expected configurationError, got \(error)")
             }
         }
     }

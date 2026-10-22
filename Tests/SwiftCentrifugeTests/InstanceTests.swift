@@ -44,11 +44,11 @@ final class InstanceTests: @unchecked Sendable {
             config.instance = invalid
             do {
                 _ = try CentrifugeClient.create(endpoint: server.url, config: config)
-                Issue.record("create accepted the instance \(invalid.count) characters long", sourceLocation: #_sourceLocation)
+                Issue.record("create accepted the instance \(invalid.count) characters long")
             } catch CentrifugeError.configurationError(let message) {
                 #expect(invalid.isEmpty || !message.contains(invalid), "the error text does not contain the instance")
             } catch {
-                Issue.record("create threw \(error) instead of configurationError", sourceLocation: #_sourceLocation)
+                Issue.record("create threw \(error) instead of configurationError")
             }
         }
     }
@@ -85,7 +85,7 @@ final class InstanceTests: @unchecked Sendable {
                 failed.fulfill()
             }
         }
-        await parityFulfillment(of: [failed], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [failed], within: 5)
         #expect(delegate.reportedErrors.count == 1, "connect() reports the error once")
         #expect(server.received().isEmpty, "nothing is sent for an invalid configuration")
         withExtendedLifetime(delegate) {}
@@ -102,7 +102,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate)
         setup.client.connect()
-        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [connected], within: 5)
 
         let lines: [String] = logger.all
         let leaked: [String] = lines.filter { (line: String) -> Bool in
@@ -122,7 +122,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate)
         setup.client.connect()
-        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [connected], within: 5)
 
         let request: Centrifugal_Centrifuge_Protocol_ConnectRequest? = connectRequest()
         #expect(request?.instance == validInstance)
@@ -137,7 +137,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: CentrifugeClientConfig(), delegate: delegate)
         setup.client.connect()
-        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: [connected], within: 5)
 
         #expect(connectRequest()?.instance == "")
         withExtendedLifetime(delegate) {}

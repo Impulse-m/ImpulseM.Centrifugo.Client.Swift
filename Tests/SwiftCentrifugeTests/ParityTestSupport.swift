@@ -4,28 +4,10 @@ import Testing
 
 // Helpers of the tests of the parity features (instance, server time, identity). They are
 // built on the public delegate and logger protocols, and on the seams of ManualScheduler.swift.
-
-/// Suspends until every expectation is fulfilled, or `timeout` elapses. The parity tests call this
-/// instead of `fulfillment(of:within:)`, whose source location is defaulted: the Swift 6.1.2 toolchain
-/// of CI crashes on that default, so the source location is always passed here explicitly.
-func parityFulfillment(
-    of expectations: [Expectation],
-    within timeout: TimeInterval,
-    sourceLocation: SourceLocation
-) async {
-    await fulfillment(of: expectations, within: timeout, sourceLocation: sourceLocation)
-}
-
-
-/// The single-expectation form of `parityFulfillment(of:within:sourceLocation:)`.
-func parityFulfillment(
-    of expectation: Expectation,
-    within timeout: TimeInterval,
-    sourceLocation: SourceLocation
-) async {
-    await fulfillment(of: [expectation], within: timeout, sourceLocation: sourceLocation)
-}
-
+//
+// A test file that calls `fulfillment` or `Issue.record` must import Testing, even when it uses
+// nothing else from it: their source location defaults to `#_sourceLocation`, a Testing macro, and
+// the Swift 6.1.2 compiler crashes on that default in a file that does not import it.
 
 /// Counts the events of one kind and lets a test wait until a count is reached. Guarded by a lock, so
 /// the count can be read and waited on from any thread.
@@ -78,7 +60,7 @@ final class EventCounter: @unchecked Sendable {
         if registerWaiter(target: times, expectation: expectation) {
             return
         }
-        await parityFulfillment(of: expectation, within: 5, sourceLocation: #_sourceLocation)
+        await fulfillment(of: expectation, within: 5)
     }
 
 
