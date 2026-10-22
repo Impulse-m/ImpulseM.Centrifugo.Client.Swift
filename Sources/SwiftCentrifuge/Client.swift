@@ -1351,7 +1351,11 @@ fileprivate extension CentrifugeClient {
     private func stopWaitPing() {
         self.pingTimer?.cancel()
     }
-    
+}
+
+
+// The connection refresh is reached from Refresh.swift, so it is internal (the extension is not fileprivate).
+internal extension CentrifugeClient {
     func startConnectionRefresh(after delay: TimeInterval) {
         // One refresh chain per connection: a new step replaces the pending one, and
         // the chain stops at its next step once the connection it was started for is
@@ -1418,7 +1422,10 @@ fileprivate extension CentrifugeClient {
     func stopConnectionRefresh() {
         self.refreshTask?.cancel()
     }
-    
+}
+
+
+fileprivate extension CentrifugeClient {
     private func stopReconnect() {
         self.reconnectTask?.cancel()
         self.reconnectTask = nil
@@ -1582,6 +1589,11 @@ fileprivate extension CentrifugeClient {
         })
     }
     
+}
+
+
+// The refresh command is sent from Refresh.swift, so it is internal (the extension is not fileprivate).
+internal extension CentrifugeClient {
     func sendRefresh(token: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_RefreshResult?, Error?)->()) {
         var req = Centrifugal_Centrifuge_Protocol_RefreshRequest()
         req.token = token
@@ -1604,7 +1616,10 @@ fileprivate extension CentrifugeClient {
             }
         })
     }
-    
+}
+
+
+fileprivate extension CentrifugeClient {
     private func sendUnsubscribe(channel: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_UnsubscribeResult?, Error?)->()) {
         var req = Centrifugal_Centrifuge_Protocol_UnsubscribeRequest()
         req.channel = channel

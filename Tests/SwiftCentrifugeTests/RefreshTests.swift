@@ -342,8 +342,9 @@ final class RefreshTests: @unchecked Sendable {
         let armedBefore: Int = setup.scheduler.scheduledCalls.count
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [reported], within: 5)
-        // Nothing but command timeouts is armed after the refusal.
-        await setup.scheduler.advance(by: 100)
+        // Nothing but command timeouts is armed after the refusal. The advance stays before the ping window of the
+        // fake server ends (its connect result carries ping 25 s, and it never pings), so no reconnect is armed.
+        await setup.scheduler.advance(by: 20)
         let armedAfter: [ScheduledCall] = Array(setup.scheduler.scheduledCalls.dropFirst(armedBefore))
         #expect(armedAfter.allSatisfy { (call: ScheduledCall) -> Bool in
             return call.lateGrace
