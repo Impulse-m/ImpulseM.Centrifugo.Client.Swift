@@ -232,8 +232,6 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate(set) var url: String
     fileprivate(set) var syncQueue: DispatchQueue
     fileprivate(set) var config: CentrifugeClientConfig
-    internal let clock: ClientClock
-    internal let random: ClientRandom
     internal let scheduler: ClientScheduler
     
     //MARK -
@@ -287,50 +285,61 @@ public class CentrifugeClient: @unchecked Sendable {
     ///   - url: protobuf URL endpoint of Centrifugo/Centrifuge.
     ///   - config: config object.
     ///   - delegate: delegate protocol implementation to react on client events.
-    public convenience init(endpoint: String, config: CentrifugeClientConfig, delegate: CentrifugeClientDelegate? = nil) {
-        self.init(
-            endpoint: endpoint,
-            config: config,
-            delegate: delegate,
-            clock: SystemClientClock(),
-            random: SystemClientRandom(),
-            schedulerFactory: productionSchedulerFactory
-        )
+    public init(endpoint: String, config: CentrifugeClientConfig, delegate: CentrifugeClientDelegate? = nil) {
+        self.url = endpoint
+        self.config = config
+        self.delegate = delegate
+        self.log = config.logger ?? EmptyLogger.instance
+
+        self.token = config.token;
+
+        if config.data != nil {
+            self.data = config.data;
+        }
+
+        let queueID = UUID().uuidString
+        self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+        self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: SystemClientClock())
+        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
+        self.logTransportChoice()
     }
 
-    /// Initialize client with the clock, random and scheduler seams (see Scheduler.swift).
+    /// Initialize client with the clock and scheduler seams (see Scheduler.swift). The public
+    /// initializer above passes the production values; tests reach this one through
+    /// `@testable import`. The two initializers differ only in the scheduler.
     internal init(
         endpoint: String,
         config: CentrifugeClientConfig,
         delegate: CentrifugeClientDelegate?,
         clock: ClientClock,
-        random: ClientRandom,
         schedulerFactory: ClientSchedulerFactory
     ) {
         self.url = endpoint
         self.config = config
         self.delegate = delegate
         self.log = config.logger ?? EmptyLogger.instance
-        
-        self.token = config.token;
-        
+        self.token = config.token
         if config.data != nil {
-            self.data = config.data;
+            self.data = config.data
         }
-        
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
-        self.clock = clock
-        self.random = random
         self.scheduler = schedulerFactory(self.syncQueue, clock)
-        
-        var request = URLRequest(url: URL(string: self.url)!)
-        for (key, value) in self.config.headers {
+        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
+        self.logTransportChoice()
+    }
+
+    /// The request of the endpoint, with the headers of the config.
+    private static func makeRequest(endpoint: String, config: CentrifugeClientConfig) -> URLRequest {
+        var request = URLRequest(url: URL(string: endpoint)!)
+        for (key, value) in config.headers {
             request.addValue(value, forHTTPHeaderField: key)
         }
+        return request
+    }
 
-        self.request = request
-
+    /// Logs the transport the client uses. Called once all stored properties are set.
+    private func logTransportChoice() {
         if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), config.useNativeWebSocket {
             log.info("Using NativeWebSocket")
         } else {

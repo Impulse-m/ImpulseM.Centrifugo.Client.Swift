@@ -49,20 +49,25 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(behind > before)
     }
 
-    @Test func overflowMovesToTheNextSecond() {
+    @Test func overflowMovesToTheNextSecond() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
-        // The sequence of second 100 runs from the lane 7 up to 2^20 - 1.
+        // The sequence of second 100 runs from the lane 7 up to 2^20 - 1. The loop is bounded
+        // by one more than that run, so a generator that never moves on fails instead of hanging.
+        let bound: UInt64 = MsgIdGenerator.sequenceLimit + 2
         var inSecond: UInt64 = 0
-        while true {
+        var moved: UInt64? = nil
+        for _ in 0 ..< bound {
             let id: UInt64 = generator.next(serverTimeMillis: 100_000)
             if timePart(id) != 100 {
-                #expect(timePart(id) == 101)
-                #expect(sequencePart(id) == 7)
+                moved = id
                 break
             }
             inSecond += 1
         }
+        let overflowId: UInt64 = try #require(moved, "the second moves on within the sequence limit")
+        #expect(timePart(overflowId) == 101)
+        #expect(sequencePart(overflowId) == 7)
         #expect(inSecond == MsgIdGenerator.sequenceLimit - 7)
     }
 
@@ -88,16 +93,20 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(random.requestedRanges.count == 1, "the same second draws no lane")
     }
 
+    // Two generators with the production random source, started in the same second. A lane
+    // is drawn from 2^19 values, so the 20 pairs are all equal only if the source is ignored.
     @Test func twoDefaultGeneratorsInTheSameSecondGiveDifferentFirstIds() {
-        for lane: UInt64 in 0 ..< 20 {
-            let firstRandom: ManualRandom = ManualRandom(lanes: [lane])
-            let secondRandom: ManualRandom = ManualRandom(lanes: [lane + 1])
-            var first: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: firstRandom)
-            var second: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: secondRandom)
+        var equalPairs: Int = 0
+        for _ in 0 ..< 20 {
+            var first: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: SystemClientRandom())
+            var second: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: SystemClientRandom())
             let firstId: UInt64 = first.next(serverTimeMillis: 100_000)
             let secondId: UInt64 = second.next(serverTimeMillis: 100_000)
-            #expect(firstId != secondId)
+            if firstId == secondId {
+                equalPairs += 1
+            }
         }
+        #expect(equalPairs < 20, "the default random source gives different lanes")
     }
 
     @Test func largestTimePartFitsFiftyThreeBits() {
@@ -116,7 +125,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
     }
 
     // The range [0, 2^19) holds 2^19 values, 19 bits; the name is the spec's canonical row name.
-    @Test func laneIsDrawnFromTheTwentyBitsRange() {
+    @Test func laneIsDrawnFromTheNineteenBitsRange() {
         let low: ManualRandom = ManualRandom(lanes: [lowerLane])
         var lowGenerator: MsgIdGenerator = MsgIdGenerator(now: 0, random: low)
         #expect(sequencePart(lowGenerator.next(serverTimeMillis: 0)) == lowerLane)

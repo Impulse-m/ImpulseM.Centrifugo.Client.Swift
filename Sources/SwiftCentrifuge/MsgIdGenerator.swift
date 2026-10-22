@@ -16,8 +16,9 @@ internal struct MsgIdGenerator {
     /// Bits of the sequence part of a msg_id.
     internal static let sequenceBits: UInt64 = 20
 
+
     /// The sequence of a second moves on to the next second when it reaches this value.
-    internal static let sequenceLimit: UInt64 = 1 << 20
+    internal static let sequenceLimit: UInt64 = 1 << MsgIdGenerator.sequenceBits
 
 
     /// Largest time part: 33 bits of unix seconds.

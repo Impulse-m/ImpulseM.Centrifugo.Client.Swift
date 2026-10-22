@@ -100,7 +100,6 @@ final class SchedulerSeamTests: @unchecked Sendable {
             config: config,
             delegate: nil,
             clock: manualClock,
-            random: ManualRandom(draw: 0.5),
             schedulerFactory: { (queue: DispatchQueue, clock: ClientClock) -> ClientScheduler in
                 let manual: ManualScheduler = ManualScheduler(queue: queue, clock: manualClock)
                 holder.set(manual)

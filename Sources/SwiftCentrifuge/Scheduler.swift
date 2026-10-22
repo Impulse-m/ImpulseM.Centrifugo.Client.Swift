@@ -6,20 +6,14 @@ import Foundation
 // are the production values. One exception: getBackoffDelay (Client.swift) keeps
 // Double.random for its other callers.
 
-/// Monotonic and wall-clock time.
+/// Monotonic time.
 internal protocol ClientClock {
     /// Monotonic time in nanoseconds, for deadlines.
     func monotonicNanos() -> UInt64
-
-    /// Wall-clock time in milliseconds since the Unix epoch.
-    func wallMillis() -> Int64
 }
 
 /// Uniform random numbers in a closed range.
 internal protocol ClientRandom {
-    /// A Double in the range (backoff and jitter).
-    func uniform(_ range: ClosedRange<Double>) -> Double
-
     /// A UInt64 in the range (msg_id lanes).
     func uniform(_ range: ClosedRange<UInt64>) -> UInt64
 }
@@ -36,28 +30,13 @@ internal protocol ClientScheduler {
 /// Builds the scheduler of a client from its queue and clock.
 internal typealias ClientSchedulerFactory = (DispatchQueue, ClientClock) -> ClientScheduler
 
-/// The scheduler the public initializer of the client uses.
-internal let productionSchedulerFactory: ClientSchedulerFactory = { (queue: DispatchQueue, clock: ClientClock) -> ClientScheduler in
-    return DispatchClientScheduler(queue: queue, clock: clock)
-}
-
 internal struct SystemClientClock: ClientClock {
     internal func monotonicNanos() -> UInt64 {
         return DispatchTime.now().uptimeNanoseconds
     }
-
-
-    internal func wallMillis() -> Int64 {
-        return Int64(Date().timeIntervalSince1970 * 1000)
-    }
 }
 
 internal struct SystemClientRandom: ClientRandom {
-    internal func uniform(_ range: ClosedRange<Double>) -> Double {
-        return Double.random(in: range)
-    }
-
-
     internal func uniform(_ range: ClosedRange<UInt64>) -> UInt64 {
         return UInt64.random(in: range)
     }

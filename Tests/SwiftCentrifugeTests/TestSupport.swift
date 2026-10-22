@@ -1,6 +1,38 @@
 import Foundation
 import Testing
 
+/// A value that a test double shares between threads, guarded by a lock.
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock: NSLock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    var current: T {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return value
+    }
+
+    func set(_ newValue: T) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func update(_ body: (inout T) -> Void) {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        body(&value)
+    }
+}
+
 /// swift-testing has no `XCTestExpectation`, and nothing in the framework fills
 /// the gap: `confirmation(...)` counts callbacks inside a scope but does not wait
 /// for them (it checks the count when its body returns), and `.timeLimit()` is a

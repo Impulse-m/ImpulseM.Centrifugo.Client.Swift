@@ -7,43 +7,10 @@ import Foundation
 // moves the clock by the same delta. The test body calls `advance(by:)`; a delegate
 // callback never does. Nothing here calls `syncQueue.sync`.
 
-/// A value that a test double shares between threads, guarded by a lock.
-final class LockedBox<T>: @unchecked Sendable {
-    private let lock: NSLock = NSLock()
-    private var value: T
-
-    init(_ value: T) {
-        self.value = value
-    }
-
-    var current: T {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return value
-    }
-
-    func set(_ newValue: T) {
-        lock.lock()
-        value = newValue
-        lock.unlock()
-    }
-
-    func update(_ body: (inout T) -> Void) {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        body(&value)
-    }
-}
-
 /// A clock the test moves by hand.
 final class ManualClock: ClientClock, @unchecked Sendable {
     private let lock: NSLock = NSLock()
     private var nanos: UInt64 = 1_000_000_000
-    private let baseWallMillis: Int64 = 1_700_000_000_000
 
     func monotonicNanos() -> UInt64 {
         lock.lock()
@@ -53,14 +20,6 @@ final class ManualClock: ClientClock, @unchecked Sendable {
         return nanos
     }
 
-    func wallMillis() -> Int64 {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return baseWallMillis + Int64(nanos / 1_000_000)
-    }
-
     func advance(by delta: TimeInterval) {
         lock.lock()
         nanos += clientNanos(delta)
@@ -68,9 +27,9 @@ final class ManualClock: ClientClock, @unchecked Sendable {
     }
 }
 
-/// A random source the test controls. A Double draw of 0 gives the lower bound of a
-/// range, 1 the upper bound. Integer draws take the scripted values first, in order,
-/// then the Double draw. Every integer range asked for is recorded.
+/// A random source the test controls. The scripted values are returned first, in order;
+/// after them a draw takes the position `draw` in the range: 0 gives the lower bound, 1
+/// the upper bound. Every range asked for is recorded.
 final class ManualRandom: ClientRandom, @unchecked Sendable {
     private let lock: NSLock = NSLock()
     private var draw: Double
@@ -82,20 +41,13 @@ final class ManualRandom: ClientRandom, @unchecked Sendable {
         self.lanes = lanes
     }
 
-    /// The integer ranges asked for so far, in order.
+    /// The ranges asked for so far, in order.
     var requestedRanges: [ClosedRange<UInt64>] {
         lock.lock()
         defer {
             lock.unlock()
         }
         return integerRanges
-    }
-
-    func uniform(_ range: ClosedRange<Double>) -> Double {
-        lock.lock()
-        let current: Double = draw
-        lock.unlock()
-        return range.lowerBound + (range.upperBound - range.lowerBound) * current
     }
 
     func uniform(_ range: ClosedRange<UInt64>) -> UInt64 {
