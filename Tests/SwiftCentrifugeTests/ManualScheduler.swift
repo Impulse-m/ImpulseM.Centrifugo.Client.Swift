@@ -9,11 +9,20 @@ import Foundation
 
 /// A clock the test moves by hand.
 final class ManualClock: ClientClock, @unchecked Sendable {
+    // The wall clock starts here (a fixed instant, 2023-11-14T22:13:20Z) and moves with the
+    // monotonic one, so both advance by the same delta.
+    static let wallOriginMillis: Int64 = 1_700_000_000_000
+
     private let nanos: LockedBox<UInt64> = LockedBox(1_000_000_000)
 
 
     func monotonicNanos() -> UInt64 {
         return nanos.current
+    }
+
+
+    func wallMillis() -> Int64 {
+        return ManualClock.wallOriginMillis + Int64(nanos.current / 1_000_000)
     }
 
 
@@ -100,6 +109,7 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
     // In insertion order; among equal due times the earlier insertion runs first.
     private var pending: [Pending] = []
     private var calls: [ScheduledCall] = []
+    private var observer: ((ScheduledCall) -> Void)?
 
 
     init(queue: DispatchQueue, clock: ManualClock) {
@@ -108,12 +118,24 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
     }
 
 
+    /// Sets the function called after every `schedule`, on the thread that scheduled. A test
+    /// uses it to learn that a timer was armed, without waiting on real time.
+    func observe(_ body: @escaping (ScheduledCall) -> Void) {
+        lock.lock()
+        observer = body
+        lock.unlock()
+    }
+
+
     func schedule(after delay: TimeInterval, lateGrace: Bool, _ item: DispatchWorkItem) {
         lock.lock()
         let due: UInt64 = clock.monotonicNanos() + clientNanos(delay)
         pending.append(Pending(due: due, item: item))
-        calls.append(ScheduledCall(delay: delay, lateGrace: lateGrace))
+        let call: ScheduledCall = ScheduledCall(delay: delay, lateGrace: lateGrace)
+        calls.append(call)
+        let watch: ((ScheduledCall) -> Void)? = observer
         lock.unlock()
+        watch?(call)
     }
 
 
@@ -168,4 +190,40 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
         }
         return best
     }
+}
+
+
+/// A client together with the clock and the scheduler it was built with.
+struct ManualClientSetup {
+    let client: CentrifugeClient
+    let clock: ManualClock
+    let scheduler: ManualScheduler
+}
+
+
+/// Builds a client on a ManualClock and a ManualScheduler. The client's own factory makes the
+/// scheduler, so it runs on the client's queue; the factory runs inside the initializer.
+func makeManualClient(
+    endpoint: String,
+    config: CentrifugeClientConfig,
+    delegate: CentrifugeClientDelegate? = nil
+) -> ManualClientSetup {
+    let clock: ManualClock = ManualClock()
+    let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
+    let client: CentrifugeClient = CentrifugeClient(
+        endpoint: endpoint,
+        config: config,
+        delegate: delegate,
+        clock: clock,
+        schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
+            let manual: ManualScheduler = ManualScheduler(
+                queue: queue,
+                clock: factoryClock as! ManualClock
+            )
+            holder.set(manual)
+            return manual
+        }
+    )
+    let scheduler: ManualScheduler = holder.current!
+    return ManualClientSetup(client: client, clock: clock, scheduler: scheduler)
 }

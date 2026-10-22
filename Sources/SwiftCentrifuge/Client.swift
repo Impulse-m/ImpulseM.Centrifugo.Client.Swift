@@ -62,6 +62,7 @@ public struct CentrifugeClientConfig {
     ///   - tokenGetter: Callback for retrieving authentication tokens dynamically
     ///   - logger: Logger instance for debugging and diagnostics
     ///   - tlsChallengeHandler: Optional handler receiving every challenge the native WebSocket transport's `URLSession` gets at the session level (server-trust, client-certificate/mTLS, and also NTLM/Negotiate for an authenticating proxy), e.g. to trust a private CA, pin a certificate, or present a client identity. Takes precedence over `tlsSkipVerify` when both are set
+    ///   - instance: Optional id of this client, 22 to 64 characters of A-Z, a-z, 0-9, `_` or `-`. Sent in the connect request and never logged. See `CentrifugeClient.create`
     public init(
         timeout: Double = 5.0,
         headers: [String : String] = .init(),
@@ -78,7 +79,8 @@ public struct CentrifugeClientConfig {
         urlSessionConfigurationProvider: URLSessionConfigurationProvider? = nil,
         tokenGetter: CentrifugeConnectionTokenGetter? = nil,
         logger: CentrifugeLogger? = nil,
-        tlsChallengeHandler: CentrifugeTLSChallengeHandler? = nil
+        tlsChallengeHandler: CentrifugeTLSChallengeHandler? = nil,
+        instance: String? = nil
     ) {
         self.timeout = timeout
         self.headers = headers
@@ -97,6 +99,7 @@ public struct CentrifugeClientConfig {
         self.tokenGetter = tokenGetter
         self.logger = logger
         self.tlsChallengeHandler = tlsChallengeHandler
+        self.instance = instance
     }
 
     /// Timeout for server responses and for opening the connection (the WebSocket
@@ -180,6 +183,12 @@ public struct CentrifugeClientConfig {
     /// handler on every path.
     public var tlsChallengeHandler: CentrifugeTLSChallengeHandler?
 
+    /// Id of this client on the server, 22 to 64 characters of A-Z, a-z, 0-9, `_` or `-`. It is
+    /// sent in the connect request when set, and it is never written to the debug log. An invalid
+    /// value is refused by `CentrifugeClient.create`, and reported through `onError` at `connect()`
+    /// by `init`.
+    public var instance: String?
+
 }
 
 /// A typealias for a provider that returns a custom `URLSessionConfiguration`.
@@ -233,6 +242,12 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate(set) var syncQueue: DispatchQueue
     fileprivate(set) var config: CentrifugeClientConfig
     internal let scheduler: ClientScheduler
+    internal let clock: ClientClock
+    // Set when the configuration cannot be used (see Instance.swift): connect() reports it and
+    // rpc() fails with it. Nil for a usable configuration.
+    internal let configError: CentrifugeError?
+    internal let serverTimeOffset: ServerTimeOffset = ServerTimeOffset()
+    fileprivate var identity: ConnectionIdentity = ConnectionIdentity()
     
     //MARK -
     fileprivate(set) var internalState: CentrifugeClientState = .disconnected
@@ -299,7 +314,9 @@ public class CentrifugeClient: @unchecked Sendable {
         
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
-        self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: SystemClientClock())
+        self.clock = SystemClientClock()
+        self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: self.clock)
+        self.configError = instanceConfigurationError(config.instance)
         
         var request = URLRequest(url: URL(string: self.url)!)
         for (key, value) in self.config.headers {
@@ -341,7 +358,9 @@ public class CentrifugeClient: @unchecked Sendable {
         }
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+        self.clock = clock
         self.scheduler = schedulerFactory(self.syncQueue, clock)
+        self.configError = instanceConfigurationError(config.instance)
         var request = URLRequest(url: URL(string: endpoint)!)
         for (key, value) in config.headers {
             request.addValue(value, forHTTPHeaderField: key)
@@ -367,6 +386,10 @@ public class CentrifugeClient: @unchecked Sendable {
             guard let strongSelf = self else { return }
             guard strongSelf.state != .connecting else { return }
             guard strongSelf.state != .connected else { return }
+            if let error: CentrifugeError = strongSelf.configError {
+                strongSelf.delegate?.onError(strongSelf, CentrifugeErrorEvent(error: error))
+                return
+            }
             strongSelf.log.debug("start connecting")
             strongSelf.state = .connecting
             strongSelf.delegate?.onConnecting(strongSelf, CentrifugeConnectingEvent(code: connectingCodeConnectCalled, reason: "connect called"))
@@ -545,6 +568,10 @@ public class CentrifugeClient: @unchecked Sendable {
     public func rpc(method: String, data: Data, completion: @escaping (Result<CentrifugeRpcResult, Error>)->()) {
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
+            if let error: CentrifugeError = strongSelf.configError {
+                completion(.failure(error))
+                return
+            }
             strongSelf.waitForConnect(completion: { [weak self] error in
                 guard let strongSelf = self else { return }
                 if let err = error {
@@ -635,6 +662,9 @@ internal extension CentrifugeClient {
                     }
                 }
                 if let res = result {
+                    if strongSelf.identity.applyRefresh(user: res.user, authClass: res.authClass) {
+                        strongSelf.delegate?.onAuth(strongSelf, CentrifugeAuthEvent(user: strongSelf.identity.user, authClass: strongSelf.identity.authClass))
+                    }
                     if res.expires {
                         strongSelf.startConnectionRefresh(ttl: res.ttl)
                     }
@@ -972,6 +1002,8 @@ fileprivate extension CentrifugeClient {
             self.reconnectAttempts = 0
             self.client = result.client
             self.delegate?.onConnected(self, CentrifugeConnectedEvent(client: result.client, data: result.data))
+            self.identity.applyConnect(user: result.user, authClass: result.authClass)
+            self.delegate?.onAuth(self, CentrifugeAuthEvent(user: self.identity.user, authClass: self.identity.authClass))
             for cb in self.connectCallbacks.values {
                 cb(nil)
             }
@@ -1269,6 +1301,7 @@ fileprivate extension CentrifugeClient {
                 // A message earlier in this frame ended the connection (a disconnect
                 // push, an error reply): the rest of the frame belongs to it too.
                 guard self.transportId == transportId else { break }
+                self.serverTimeFrom(reply: reply)
                 if reply.id > 0 {
                     self.opCallbacks[reply.id]?(CentrifugeResolveData(error: nil, reply: reply))
                 } else {
@@ -1484,6 +1517,11 @@ fileprivate extension CentrifugeClient {
         }
         req.name = self.config.name
         req.version = self.config.version
+        req.flag = ConnectFlags.rpcOptions
+        if let instance: String = self.config.instance {
+            req.instance = instance
+            self.log.debug("connect instance=\(instanceRedaction)")
+        }
         if !self.serverSubs.isEmpty {
             var subs = [String: Centrifugal_Centrifuge_Protocol_SubscribeRequest]()
             for (channel, serverSub) in self.serverSubs {

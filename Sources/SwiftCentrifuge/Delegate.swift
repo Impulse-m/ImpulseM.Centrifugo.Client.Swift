@@ -18,6 +18,18 @@ public struct CentrifugeConnectedEvent{
     }
 }
 
+/// The identity the server confirmed for the connection: on every connect, and on a refresh
+/// that changed it.
+public struct CentrifugeAuthEvent {
+    public let user: String
+    public let authClass: String
+
+    public init(user: String, authClass: String) {
+        self.user = user
+        self.authClass = authClass
+    }
+}
+
 public struct CentrifugeDisconnectedEvent{
     public let code: UInt32
     public let reason: String
@@ -311,6 +323,7 @@ public struct CentrifugeServerLeaveEvent {
 ///   transition that produced them.
 public protocol CentrifugeClientDelegate: AnyObject {
     func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent)
+    func onAuth(_ client: CentrifugeClient, _ event: CentrifugeAuthEvent)
     func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent)
     func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent)
     
@@ -328,6 +341,7 @@ public protocol CentrifugeClientDelegate: AnyObject {
 
 public extension CentrifugeClientDelegate {
     func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {}
+    func onAuth(_ client: CentrifugeClient, _ event: CentrifugeAuthEvent) {}
     func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {}
     func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {}
     

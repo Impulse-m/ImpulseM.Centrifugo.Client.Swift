@@ -6,10 +6,13 @@ import Foundation
 // are the production values. One exception: getBackoffDelay (Client.swift) keeps
 // Double.random for its other callers.
 
-/// Monotonic time.
+/// Monotonic and wall-clock time.
 internal protocol ClientClock {
     /// Monotonic time in nanoseconds, for deadlines.
     func monotonicNanos() -> UInt64
+
+    /// Wall-clock time in milliseconds since the unix epoch, for the server time offset.
+    func wallMillis() -> Int64
 }
 
 /// Uniform random numbers in a closed range.
@@ -33,6 +36,12 @@ internal typealias ClientSchedulerFactory = (DispatchQueue, ClientClock) -> Clie
 internal struct SystemClientClock: ClientClock {
     internal func monotonicNanos() -> UInt64 {
         return DispatchTime.now().uptimeNanoseconds
+    }
+
+
+    internal func wallMillis() -> Int64 {
+        let millis: Double = Date().timeIntervalSince1970 * 1000
+        return Int64(millis)
     }
 }
 

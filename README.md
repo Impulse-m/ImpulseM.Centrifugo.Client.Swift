@@ -62,6 +62,12 @@ This library depends on [SwiftProtobuf](https://github.com/apple/swift-protobuf)
 
 An [example app](Example) is included demonstrating basic client functionality.
 
+## Instance, server time and identity
+
+- `CentrifugeClientConfig.instance` is an optional id of the client: 22 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` or `-`. It is sent in the connect request and is never written to the debug log, which shows `connect instance=<redacted>`. `CentrifugeClient.create(endpoint:config:delegate:)` throws `CentrifugeError.configurationError` for an invalid instance; `CentrifugeClient(endpoint:config:delegate:)` still returns a client, which reports the error through `onError` at `connect()`.
+- `serverTimeMillis()` returns the server time: the local clock plus the offset of the last command reply that carried a time. It needs `client.reply_include_server_time` on the server. Before such a reply it returns the local time.
+- `CentrifugeClientDelegate.onAuth(_:_:)` reports the `user` and `authClass` of the connection on every connect, and on a refresh that changes them.
+
 ## Usage in background
 
 When a mobile application goes to the background there are OS-specific limitations for established persistent connections - which can be silently closed shortly. Thus in most cases you need to disconnect from a server when app moves to the background and connect again when app goes to the foreground.
