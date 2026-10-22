@@ -1,13 +1,15 @@
 .PHONY: all proto proto-check-tools test run-console-example
 
-PROTOC_VERSION := 34.0
+# The generator and Protocol pins (protoc version, swift-protobuf tag and commit,
+# the Protocol commit client.proto is copied from) live in tools.env, which the
+# proto-check workflow reads too.
+include tools.env
 
 all: proto
 
-# The generator pin: protoc 34.0 and protoc-gen-swift built from swift-protobuf
-# tag 1.35.0 (commit 9bbb079b). The plugin has no version flag, so only protoc is
-# checked here; the proto-check workflow builds the plugin from that tag and fails
-# on any diff.
+# protoc 34.0 and protoc-gen-swift built from the pinned swift-protobuf tag. The
+# plugin has no version flag, so only protoc is checked here; the proto-check
+# workflow builds the plugin from that tag and fails on any diff.
 proto-check-tools:
 	@protoc --version | grep -qx "libprotoc $(PROTOC_VERSION)" || { echo "error: protoc $(PROTOC_VERSION) is required, found: $$(protoc --version)" >&2; exit 1; }
 
