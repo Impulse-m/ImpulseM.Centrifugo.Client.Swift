@@ -28,8 +28,9 @@ public enum CentrifugeError: Error {
     case replyErrorDetails(CentrifugeReplyError)
     /// The connection was lost while the call was on it, and the call cannot be resent on the next one.
     case connectionClosed
-    /// Reserved (code 10). No protobuf request can fail to encode, and the transport gives no write error
-    /// signal, so the client does not produce this case today. It stays for the shape of the API.
+    /// Reserved (code 10). A call gets it only when its request fails to encode, which no protobuf request
+    /// of the client can do, and the transport gives no write error signal, so no call gets it today. It
+    /// stays for the shape of the API.
     case transportWriteError(error: Error)
     /// The client refused the call itself, with a text that is not a server reply. Reserved for the
     /// rpc pool, and never a server reply code.
@@ -247,10 +248,6 @@ public enum CentrifugeClientState: Sendable {
     case connected
 }
 
-/// How long a timeout that fired late (after the process was suspended) waits for
-/// what arrived meanwhile. See `DispatchClientScheduler.schedule` in Scheduler.swift.
-let lateTimerGrace: TimeInterval = 1
-
 public class CentrifugeClient: @unchecked Sendable {
     public weak var delegate: CentrifugeClientDelegate?
     
@@ -375,7 +372,7 @@ public class CentrifugeClient: @unchecked Sendable {
         CentrifugeClient.logTransportChoice(config: config, log: self.log)
         self.rpcTracker.bind(client: self)
     }
-
+    
     /**
      Connect to server.
      */
@@ -611,7 +608,7 @@ public class CentrifugeClient: @unchecked Sendable {
 }
 
 internal extension CentrifugeClient {
-
+    
     func refreshWithToken(token: String, transportId: UInt64) {
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
@@ -658,6 +655,9 @@ internal extension CentrifugeClient {
 
     /// Gives a command the next command id and writes it on the connection. The tracker routes the
     /// reply by that id. Throws when the command cannot be encoded: nothing is written then.
+    /// It stays in this file on purpose: it calls `nextCommandId` and `sendCommandAsync`, which are
+    /// private to Client.swift, and the command counter they use is fileprivate. Moving the helper
+    /// to Client+TrackedRpc.swift would mean widening all three.
     func writeTrackedCommand(_ command: inout Centrifugal_Centrifuge_Protocol_Command) throws -> UInt32 {
         command.id = self.nextCommandId()
         try self.sendCommandAsync(command: command)
@@ -1295,11 +1295,8 @@ fileprivate extension CentrifugeClient {
                     if let callback: ((CentrifugeResolveData) -> ()) = self.opCallbacks[reply.id] {
                         self.serverTimeFrom(reply: reply)
                         callback(CentrifugeResolveData(error: nil, reply: reply))
-                    } else if self.rpcTracker.owns(commandId: reply.id) {
-                        if self.rpcTracker.awaitsReply(commandId: reply.id) {
-                            self.serverTimeFrom(reply: reply)
-                        }
-                        self.rpcTracker.handleReply(reply)
+                    } else {
+                        self.routeTrackedReply(reply)
                     }
                 } else {
                     if !reply.hasPush {
@@ -1414,7 +1411,7 @@ fileprivate extension CentrifugeClient {
             self.state = .disconnected
         }
         let needEvent = previousState != self.state
-
+        
         self.rpcTracker.onTransportLost(terminal: !reconnect)
         self.client = nil
 

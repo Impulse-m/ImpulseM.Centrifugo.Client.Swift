@@ -242,40 +242,73 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
+    /// The first call is refused with new_msg_id on the first reconnect, so its resend gets a msg_id above
+    /// the second call's. Admission order and msg_id order then differ, and the resends must follow the
+    /// msg_id. Every other command is dropped; the refusal is the only reply.
     @Test func lostCallsAreSentAgainInMsgIdOrder() async throws {
         let harness: Harness = await connectedHarness()
         let dropping: LockedBox<Bool> = LockedBox(true)
+        let refusing: LockedBox<Bool> = LockedBox(false)
+        let refused: LockedBox<Bool> = LockedBox(false)
         fake.setDrop { (command: RpcCommand) -> Bool in
-            return command.hasRpc && dropping.current
+            guard command.hasRpc && command.rpc.cancel == 0 else {
+                return false
+            }
+            if refusing.current && !refused.current {
+                return false
+            }
+            return dropping.current
+        }
+        let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueNewMsgID]
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasRpc, command.rpc.cancel == 0, refusing.current, !refused.current else {
+                return nil
+            }
+            refused.set(true)
+            return self.errorReply(code: 107, metadata: metadata)
         }
         let first: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         let second: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         await fake.awaitArrivals("two calls arrived", count: 2) { (command: RpcCommand) -> Bool in
-            return command.hasRpc
+            return command.hasRpc && command.rpc.cancel == 0
+        }
+
+        refusing.set(true)
+        await reconnect(harness, connectsSoFar: 1)
+        // The first call is resent with its msg_id, refused, and sent again with a new one: 5 arrivals.
+        await fake.awaitArrivals("the refused call was sent again", count: 5) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0
         }
 
         dropping.set(false)
-        await reconnect(harness, connectsSoFar: 1)
+        refusing.set(false)
+        await reconnect(harness, connectsSoFar: 2)
         await fulfillment(of: first.outcome.done, within: 5)
         await fulfillment(of: second.outcome.done, within: 5)
 
         let sent: [RpcCommand] = callCommands()
-        try #require(sent.count == 4)
-        let resent: [RpcCommand] = Array(sent.suffix(2))
-        #expect(resent[0].rpc.msgID < resent[1].rpc.msgID, "the resends go out in msg_id order")
-        let resentWithRetransmit: Bool = resent.allSatisfy { (command: RpcCommand) -> Bool in
+        try #require(sent.count == 7, "two first sends, two resends, the new id of the refused call, and two last resends")
+        let refusedNewID: UInt64 = sent[4].rpc.msgID
+        try #require(sent[1].rpc.msgID < refusedNewID, "the second call's msg_id is below the refused call's new one")
+        let lastResends: [RpcCommand] = Array(sent.suffix(2))
+        #expect(lastResends[0].rpc.msgID == sent[1].rpc.msgID, "the second call is resent first, by msg_id")
+        #expect(lastResends[1].rpc.msgID == refusedNewID, "the refused call is resent after it, by msg_id")
+        #expect(lastResends[0].rpc.msgID < lastResends[1].rpc.msgID, "the resends go out in msg_id order")
+        let resentWithRetransmit: Bool = lastResends.allSatisfy { (command: RpcCommand) -> Bool in
             return command.rpc.retransmit
         }
         #expect(resentWithRetransmit)
         let commandIds: Set<UInt32> = Set(sent.map { (command: RpcCommand) -> UInt32 in
             return command.id
         })
-        #expect(commandIds.count == 4, "every write takes a fresh command id")
+        #expect(commandIds.count == 7, "every write takes a fresh command id")
     }
 
 
-    /// A call that never reached the wire (admitted while the connection was down, so it was never in a
-    /// batch that was written) goes out as a first send with its msg_id when the connection returns.
+    /// A call that never reached the wire (admitted while the connection was down, so it was never written)
+    /// goes out as a first send with its msg_id when the connection returns. The tracker has no batch
+    /// concept, so a batch dropped at a disconnect has no separate path in Swift; this covers admission
+    /// during a reconnect, which is the case that path would have covered.
     @Test func aCallDroppedFromTheBatchBeforeItsWriteIsSentAsAFirstSend() async throws {
         let harness: Harness = await connectedHarness()
         await dropConnection(harness)
@@ -331,11 +364,14 @@ final class RpcTrackerTests: @unchecked Sendable {
         fake.setDrop { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel == 0
         }
+        await drain(harness)
+        let armedBeforeCall: Int = harness.scheduler.scheduledCalls.count
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         await fake.awaitArrivals("call arrived") { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel == 0
         }
         await drain(harness)
+        #expect(harness.scheduler.scheduledCalls.count - armedBeforeCall == 1, "the call arms the tracker's one timer, and no timer of its own")
         await harness.scheduler.advance(by: 1.1)
         await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
@@ -644,6 +680,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         await fulfillment(of: armed, within: 5)
         await drain(harness)
+        #expect(callCommands().count == 1, "nothing is written before the delay ends")
         await harness.scheduler.advance(by: 0.25)
         await fulfillment(of: call.outcome.done, within: 5)
 

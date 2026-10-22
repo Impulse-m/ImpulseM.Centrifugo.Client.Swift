@@ -51,6 +51,10 @@ internal struct SystemClientRandom: ClientRandom {
     }
 }
 
+/// How long a timeout that fired late (after the process was suspended) waits for what arrived
+/// meanwhile. See `DispatchClientScheduler.schedule`.
+internal let lateTimerGrace: TimeInterval = 1
+
 /// Production scheduler: a DispatchQueue timer on the client's queue. With `lateGrace`,
 /// a timer that fires much later than scheduled means the process was suspended (frozen
 /// in the background, stopped in a debugger): replies and pings that arrived meanwhile
@@ -110,12 +114,22 @@ extension CentrifugeClient {
 }
 
 
+/// The one jittered delay of the client, in nanoseconds: `min(cap, minimum + uniform[0, span])`, with the
+/// draw taken from `random`. The full-jitter delays below use it with no minimum. Connection and
+/// subscription retries with a minimum, and `getBackoffDelay` (Client.swift, which keeps Double.random for
+/// its other callers), are the same shape. A sum that overflows is capped.
+internal func jitteredDelayNanos(minimum: UInt64, span: UInt64, cap: UInt64, random: ClientRandom) -> UInt64 {
+    let drawn: UInt64 = random.uniform(0 ... span)
+    let total: (partialValue: UInt64, overflow: Bool) = minimum.addingReportingOverflow(drawn)
+    return total.overflow ? cap : min(total.partialValue, cap)
+}
+
+
 /// A full-jitter delay in nanoseconds: uniform over `0 ... min(cap, base * 2^attempt)`, drawn from the
-/// injected source. It is the shape of `getBackoffDelay` in nanoseconds, so every jittered delay of
-/// the client has one formula. The exponent is capped, so the product cannot overflow.
+/// injected source. The exponent is capped, so the product cannot overflow.
 internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: ClientRandom) -> UInt64 {
     let shift: Int = max(0, min(attempt, 62))
     let scaled: (partialValue: UInt64, overflow: Bool) = base.multipliedReportingOverflow(by: UInt64(1) << UInt64(shift))
     let ceiling: UInt64 = scaled.overflow ? cap : min(scaled.partialValue, cap)
-    return random.uniform(0 ... ceiling)
+    return jitteredDelayNanos(minimum: 0, span: ceiling, cap: cap, random: random)
 }

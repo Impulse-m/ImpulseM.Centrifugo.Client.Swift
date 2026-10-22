@@ -80,15 +80,17 @@ A call made with `rpc(method:data:options:completion:)` is tracked when the clie
 
 **Breaking change (Swift fork v2.0.0):** a server error that carries an application code, type or metadata arrives as `CentrifugeError.replyErrorDetails(CentrifugeReplyError)`, not as `.replyError`. An app that matches only `.replyError` misses those errors. Errors without them stay `.replyError`. `CentrifugeError` gains the cases `connectionClosed`, `transportWriteError`, `clientRejected` and `replyErrorDetails`, so a `switch` over `CentrifugeError` needs a `default` case. `CentrifugeRpcResult` gains `cached`, and `CentrifugeClientConfig` gains `maxPendingRpc`, both with defaults.
 
+**Breaking change (Swift fork v2.0.0):** a plain rpc call (a client without an `instance`, or a connection without the RPC options) that was written when the connection was lost now fails with `CentrifugeError.connectionClosed`, not `clientDisconnected`. An app that retries an rpc on `clientDisconnected` after a network drop must retry on `connectionClosed` as well. This applies to every client, with or without an `instance`.
+
 ### Client error codes
 
-Codes 15 to 19 are reserved for client-local errors of the fork SDKs; a server never sends them. The Swift forms are:
+Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends them. The Swift forms are:
 
 | Code | Swift form | Meaning |
 |---|---|---|
-| 10 | `transportWriteError(error:)` | Reserved. No protobuf request of the client can fail to encode, and the transport gives no write error signal, so the client does not produce it today. |
+| 10 | `transportWriteError(error:)` | Reserved. It is reached only when a request fails to encode, which no protobuf request of the client can do, and the transport gives no write error signal, so no call receives it today. |
 | 11 | `connectionClosed` | The connection was lost while the call was on it, and the call cannot be resent on the next one. |
-| 12 | `configurationError(message:)` | The configuration cannot work, for example a refresh with no token and no getter, or an invalid instance. |
+| 12 | `configurationError(message:)` | The configuration cannot work, for example an invalid instance or a `maxPendingRpc` below 1. |
 | 15 | `replyError(code: 15, ...)` | The call was not sent: the connection cannot carry what it asks for (headers). |
 | 16 | `replyError(code: 16, ...)` | The call was not sent: `maxPendingRpc` is reached. |
 | 17 | `replyError(code: 17, ...)` | The call was cancelled with `cancel()`. |

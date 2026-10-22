@@ -47,6 +47,19 @@ private func isInstanceByte(_ byte: UInt8) -> Bool {
 }
 
 
+/// The configuration error of a client, or nil when the client can work: the instance (see
+/// `instanceConfigurationError`), and `maxPendingRpc` at least 1.
+internal func clientConfigurationError(_ config: CentrifugeClientConfig) -> CentrifugeError? {
+    if let error: CentrifugeError = instanceConfigurationError(config.instance) {
+        return error
+    }
+    if config.maxPendingRpc < 1 {
+        return CentrifugeError.configurationError(message: "maxPendingRpc must be at least 1")
+    }
+    return nil
+}
+
+
 public extension CentrifugeClient {
     /// Creates a client, and refuses a configuration that cannot work. Unlike `init`, which
     /// still returns a client for such a configuration (and reports it through `onError` at

@@ -6,7 +6,7 @@ import Testing
 // and the expiry queue keeps its order across compaction. The values come from a fixed sequence, so
 // every run sees the same entries.
 
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct RpcDeadlinesTests {
     /// A fixed pseudo-random sequence (a linear congruential generator).
     private func sequence(count: Int) -> [UInt64] {

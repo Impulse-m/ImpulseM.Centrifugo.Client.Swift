@@ -9,73 +9,29 @@ import Testing
 // nothing else from it: their source location defaults to `#_sourceLocation`, a Testing macro, and
 // the Swift 6.1.2 compiler crashes on that default in a file that does not import it.
 
-/// Counts the events of one kind and lets a test wait until a count is reached. Guarded by a lock, so
-/// the count can be read and waited on from any thread.
+/// Counts the events of one kind and lets a test wait until a count is reached. The count can be read
+/// and waited on from any thread (see ArrivalLog.swift).
 final class EventCounter: @unchecked Sendable {
-    /// One waiter of `awaitCount`: fulfilled once the count reaches `target`.
-    private struct Waiter {
-        let target: Int
-        let expectation: Expectation
-    }
-
-
-    private let lock: NSLock = NSLock()
-    private var count: Int = 0
-    private var waiters: [Waiter] = []
+    private let events: ArrivalLog<Void> = ArrivalLog()
 
 
     /// The events counted so far.
     var total: Int {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return self.count
+        return events.total
     }
 
 
     /// Counts one event and fulfils the waiters that it reaches.
     func record() {
-        var ready: [Expectation] = []
-        lock.lock()
-        self.count += 1
-        let reached: Int = self.count
-        self.waiters = self.waiters.filter { (waiter: Waiter) -> Bool in
-            if reached >= waiter.target {
-                ready.append(waiter.expectation)
-                return false
-            }
-            return true
-        }
-        lock.unlock()
-        for expectation: Expectation in ready {
-            expectation.fulfill()
-        }
+        events.record(())
     }
 
 
     /// Suspends until `times` events have been counted.
     func awaitCount(times: Int) async {
-        let expectation: Expectation = Expectation("counted events")
-        if registerWaiter(target: times, expectation: expectation) {
-            return
-        }
-        await fulfillment(of: expectation, within: 5)
-    }
-
-
-    /// Adds a waiter unless the count is already reached, and tells whether it is. Synchronous, so the
-    /// lock is never taken from an async context.
-    private func registerWaiter(target: Int, expectation: Expectation) -> Bool {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        if self.count >= target {
+        await events.awaitArrivals("counted events", count: times) { (_: Void) -> Bool in
             return true
         }
-        self.waiters.append(Waiter(target: target, expectation: expectation))
-        return false
     }
 }
 
