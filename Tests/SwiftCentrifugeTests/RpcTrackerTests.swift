@@ -287,7 +287,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 17)
         } else {
-            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))")
+            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
 
         // The cancel gets no reply: after one call timeout its callbacks are dropped.
@@ -313,7 +313,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: call.outcome.done, within: 5)
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
 
         let msgID: UInt64 = callCommands().first?.rpc.msgID ?? 0
@@ -339,7 +339,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 17)
         } else {
-            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))")
+            Issue.record("expected cancelled (17), got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
             return command.hasRpc && command.rpc.cancel != 0
@@ -399,7 +399,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyError(let code, _, _)? = failure(withHeaders.outcome.result) {
             #expect(code == 15)
         } else {
-            Issue.record("expected unsupported (15), got \(String(describing: withHeaders.outcome.result))")
+            Issue.record("expected unsupported (15), got \(String(describing: withHeaders.outcome.result))", sourceLocation: #_sourceLocation)
         }
 
         let sent: [RpcCommand] = callCommands()
@@ -443,7 +443,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyError(let code, _, _)? = failure(refused.outcome.result) {
             #expect(code == 16)
         } else {
-            Issue.record("expected limit exceeded (16), got \(String(describing: refused.outcome.result))")
+            Issue.record("expected limit exceeded (16), got \(String(describing: refused.outcome.result))", sourceLocation: #_sourceLocation)
         }
 
         waiting.client.disconnect()
@@ -471,7 +471,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         await fulfillment(of: next.outcome.done, within: 5)
         if case CentrifugeError.clientDisconnected? = failure(next.outcome.result) {
         } else {
-            Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))")
+            Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))", sourceLocation: #_sourceLocation)
         }
         for handle in handles.dropFirst() {
             await fulfillment(of: handle.outcome.done, within: 5)
@@ -569,7 +569,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyErrorDetails(let details)? = failure(call.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueNewMsgID, "the error arrives unchanged")
         } else {
-            Issue.record("expected the server error, got \(String(describing: call.outcome.result))")
+            Issue.record("expected the server error, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
     }
 
@@ -653,7 +653,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyErrorDetails(let details)? = failure(call.outcome.result) {
             #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueLater)
         } else {
-            Issue.record("expected the server error after the fourth refusal, got \(String(describing: call.outcome.result))")
+            Issue.record("expected the server error after the fourth refusal, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
     }
 
@@ -669,7 +669,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         if case CentrifugeError.replyError(let code, _, _)? = failure(call.outcome.result) {
             #expect(code == 107)
         } else {
-            Issue.record("expected the server error, got \(String(describing: call.outcome.result))")
+            Issue.record("expected the server error, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
     }
 
@@ -725,7 +725,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
         if case CentrifugeError.timeout? = failure(call.outcome.result) {
         } else {
-            Issue.record("expected timeout, got \(String(describing: call.outcome.result))")
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
         }
         let msgID: UInt64 = callCommands().first?.rpc.msgID ?? 0
         await fake.awaitArrivals("cancel arrived") { (command: RpcCommand) -> Bool in
@@ -779,11 +779,11 @@ final class RpcTrackerTests: @unchecked Sendable {
         let config: CentrifugeClientConfig = instanceConfig(maxPendingRpc: 0)
         do {
             _ = try CentrifugeClient.create(endpoint: "ws://127.0.0.1:1/connection/websocket", config: config)
-            Issue.record("create should refuse maxPendingRpc below 1")
+            Issue.record("create should refuse maxPendingRpc below 1", sourceLocation: #_sourceLocation)
         } catch {
             if case CentrifugeError.configurationError = error {
             } else {
-                Issue.record("expected configurationError, got \(error)")
+                Issue.record("expected configurationError, got \(error)", sourceLocation: #_sourceLocation)
             }
         }
     }

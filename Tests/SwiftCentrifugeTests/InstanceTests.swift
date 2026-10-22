@@ -44,11 +44,11 @@ final class InstanceTests: @unchecked Sendable {
             config.instance = invalid
             do {
                 _ = try CentrifugeClient.create(endpoint: server.url, config: config)
-                Issue.record("create accepted the instance \(invalid.count) characters long")
+                Issue.record("create accepted the instance \(invalid.count) characters long", sourceLocation: #_sourceLocation)
             } catch CentrifugeError.configurationError(let message) {
                 #expect(invalid.isEmpty || !message.contains(invalid), "the error text does not contain the instance")
             } catch {
-                Issue.record("create threw \(error) instead of configurationError")
+                Issue.record("create threw \(error) instead of configurationError", sourceLocation: #_sourceLocation)
             }
         }
     }
