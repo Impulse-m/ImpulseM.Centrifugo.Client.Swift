@@ -191,39 +191,3 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
         return best
     }
 }
-
-
-/// A client together with the clock and the scheduler it was built with.
-struct ManualClientSetup {
-    let client: CentrifugeClient
-    let clock: ManualClock
-    let scheduler: ManualScheduler
-}
-
-
-/// Builds a client on a ManualClock and a ManualScheduler. The client's own factory makes the
-/// scheduler, so it runs on the client's queue; the factory runs inside the initializer.
-func makeManualClient(
-    endpoint: String,
-    config: CentrifugeClientConfig,
-    delegate: CentrifugeClientDelegate? = nil
-) -> ManualClientSetup {
-    let clock: ManualClock = ManualClock()
-    let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
-    let client: CentrifugeClient = CentrifugeClient(
-        endpoint: endpoint,
-        config: config,
-        delegate: delegate,
-        clock: clock,
-        schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
-            let manual: ManualScheduler = ManualScheduler(
-                queue: queue,
-                clock: factoryClock as! ManualClock
-            )
-            holder.set(manual)
-            return manual
-        }
-    )
-    let scheduler: ManualScheduler = holder.current!
-    return ManualClientSetup(client: client, clock: clock, scheduler: scheduler)
-}

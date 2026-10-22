@@ -11,10 +11,13 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
     let connected: Expectation
     private let authEvents: LockedBox<[CentrifugeAuthEvent]> = LockedBox([])
     private let errors: LockedBox<[Error]> = LockedBox([])
+    /// Fulfilled by every `onMessage`, when one was given.
+    private let messageArrived: Expectation?
 
 
-    init(connected: Expectation) {
+    init(connected: Expectation, messageArrived: Expectation? = nil) {
         self.connected = connected
+        self.messageArrived = messageArrived
     }
 
 
@@ -50,11 +53,52 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
     }
 
 
+    func onMessage(_ client: CentrifugeClient, _ event: CentrifugeMessageEvent) {
+        messageArrived?.fulfill()
+    }
+
+
     func onError(_ client: CentrifugeClient, _ event: CentrifugeErrorEvent) {
         errors.update { (values: inout [Error]) in
             values.append(event.error)
         }
     }
+}
+
+
+/// A client together with the clock and the scheduler it was built with.
+struct ManualClientSetup {
+    let client: CentrifugeClient
+    let clock: ManualClock
+    let scheduler: ManualScheduler
+}
+
+
+/// Builds a client on a ManualClock and a ManualScheduler. The client's own factory makes the
+/// scheduler, so it runs on the client's queue; the factory runs inside the initializer.
+func makeManualClient(
+    endpoint: String,
+    config: CentrifugeClientConfig,
+    delegate: CentrifugeClientDelegate? = nil
+) -> ManualClientSetup {
+    let clock: ManualClock = ManualClock()
+    let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
+    let client: CentrifugeClient = CentrifugeClient(
+        endpoint: endpoint,
+        config: config,
+        delegate: delegate,
+        clock: clock,
+        schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
+            let manual: ManualScheduler = ManualScheduler(
+                queue: queue,
+                clock: factoryClock as! ManualClock
+            )
+            holder.set(manual)
+            return manual
+        }
+    )
+    let scheduler: ManualScheduler = holder.current!
+    return ManualClientSetup(client: client, clock: clock, scheduler: scheduler)
 }
 
 

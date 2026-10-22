@@ -4,6 +4,13 @@ import Foundation
 // in `Reply.time`. The client keeps the offset of that time from its own wall clock, and the
 // server time is the local wall clock plus the offset. A reply without a time keeps the last
 // offset. Before any reply the offset is zero, so the server time is the local time.
+//
+// The server is untrusted input (lead rulings, security review of slice 3). A reply time more
+// than 365 days from the local clock is ignored, and every subtraction and addition reports
+// overflow instead of trapping, so a hostile time cannot crash the app.
+
+/// The largest offset a reply may set, in milliseconds (365 days). A larger one is ignored.
+internal let serverTimeMaxOffsetMillis: Int64 = 365 * 86_400_000
 
 /// The last server time offset, in milliseconds. It is written on syncQueue only, and read by
 /// any thread through the lock, so `serverTimeMillis()` never waits for the queue.
@@ -31,12 +38,20 @@ internal final class ServerTimeOffset: @unchecked Sendable {
 
 
 /// The offset a reply sets: its server time minus the local wall clock. A reply without a time
-/// (0, the value of an unset field) sets nothing.
+/// (0, the value of an unset field) sets nothing. So does a time more than 365 days from the
+/// local clock, and a difference that overflows: the caller keeps the previous offset.
 internal func serverTimeOffsetFrom(time: Int64, localMillis: Int64) -> Int64? {
     if time == 0 {
         return nil
     }
-    return time - localMillis
+    let difference: (partialValue: Int64, overflow: Bool) = time.subtractingReportingOverflow(localMillis)
+    if difference.overflow {
+        return nil
+    }
+    if difference.partialValue > serverTimeMaxOffsetMillis || difference.partialValue < -serverTimeMaxOffsetMillis {
+        return nil
+    }
+    return difference.partialValue
 }
 
 
@@ -45,17 +60,20 @@ public extension CentrifugeClient {
     /// offset of the last command reply that carried a time. Before such a reply it is the
     /// local time. Safe to call from a delegate callback.
     func serverTimeMillis() -> Int64 {
-        return self.clock.wallMillis() + self.serverTimeOffset.current
+        let localMillis: Int64 = self.clock.wallMillis()
+        let offset: Int64 = self.serverTimeOffset.current
+        let sum: (partialValue: Int64, overflow: Bool) = localMillis.addingReportingOverflow(offset)
+        if !sum.overflow {
+            return sum.partialValue
+        }
+        return offset > 0 ? Int64.max : Int64.min
     }
 
 
-    /// Takes the server time of a decoded reply. The hook of `handleData` calls it for every
-    /// reply before the reply is routed. Only command replies (id > 0) carry the time, so pushes
-    /// and pings never set the offset.
+    /// Takes the server time of a command reply that answers a pending command, the connect reply
+    /// included. The hook of `handleData` calls it only for such a reply, so a push, a ping and a
+    /// late reply to an expired call never set the offset.
     internal func serverTimeFrom(reply: Centrifugal_Centrifuge_Protocol_Reply) {
-        guard reply.id > 0 else {
-            return
-        }
         let localMillis: Int64 = self.clock.wallMillis()
         guard let offset: Int64 = serverTimeOffsetFrom(time: reply.time, localMillis: localMillis) else {
             return

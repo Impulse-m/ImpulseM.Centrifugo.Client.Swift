@@ -157,26 +157,11 @@ final class SchedulerSeamTests: @unchecked Sendable {
 
     /// Timeouts pass `lateGrace` true; the reconnect, refresh and resubscribe timers pass false.
     @Test func timeoutsPassLateGraceAndOtherTimersDoNot() {
-        let manualClock: ManualClock = ManualClock()
-        let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
-        let client: CentrifugeClient = CentrifugeClient(
-            endpoint: server.url,
-            config: CentrifugeClientConfig(),
-            delegate: nil,
-            clock: manualClock,
-            schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
-                let manual: ManualScheduler = ManualScheduler(
-                    queue: queue,
-                    clock: factoryClock as! ManualClock
-                )
-                holder.set(manual)
-                return manual
-            }
-        )
-        client.scheduleTimeout(after: 3, DispatchWorkItem {})
-        client.scheduleAfter(4, DispatchWorkItem {})
+        let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: CentrifugeClientConfig())
+        setup.client.scheduleTimeout(after: 3, DispatchWorkItem {})
+        setup.client.scheduleAfter(4, DispatchWorkItem {})
 
-        let calls: [ScheduledCall] = holder.current?.scheduledCalls ?? []
+        let calls: [ScheduledCall] = setup.scheduler.scheduledCalls
         #expect(calls.count == 2)
         #expect(calls.first?.delay == 3)
         #expect(calls.first?.lateGrace == true, "a timeout passes lateGrace true")

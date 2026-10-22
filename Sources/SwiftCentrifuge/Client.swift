@@ -1001,8 +1001,8 @@ fileprivate extension CentrifugeClient {
             self.state = .connected
             self.reconnectAttempts = 0
             self.client = result.client
-            self.delegate?.onConnected(self, CentrifugeConnectedEvent(client: result.client, data: result.data))
             self.identity.applyConnect(user: result.user, authClass: result.authClass)
+            self.delegate?.onConnected(self, CentrifugeConnectedEvent(client: result.client, data: result.data))
             self.delegate?.onAuth(self, CentrifugeAuthEvent(user: self.identity.user, authClass: self.identity.authClass))
             for cb in self.connectCallbacks.values {
                 cb(nil)
@@ -1301,9 +1301,12 @@ fileprivate extension CentrifugeClient {
                 // A message earlier in this frame ended the connection (a disconnect
                 // push, an error reply): the rest of the frame belongs to it too.
                 guard self.transportId == transportId else { break }
-                self.serverTimeFrom(reply: reply)
                 if reply.id > 0 {
-                    self.opCallbacks[reply.id]?(CentrifugeResolveData(error: nil, reply: reply))
+                    // Only a reply that answers a pending command sets the server time.
+                    if let callback: ((CentrifugeResolveData) -> ()) = self.opCallbacks[reply.id] {
+                        self.serverTimeFrom(reply: reply)
+                        callback(CentrifugeResolveData(error: nil, reply: reply))
+                    }
                 } else {
                     if !reply.hasPush {
                         self.handlePing()
