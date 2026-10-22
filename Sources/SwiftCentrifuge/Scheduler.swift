@@ -117,7 +117,7 @@ extension CentrifugeClient {
 /// A full-jitter delay in nanoseconds: uniform over `0 ... min(cap, base * 2^attempt)`, drawn from the
 /// injected source. The exponent is capped, so the product cannot overflow. The draw is never above
 /// `cap`, so no further clamp is needed. The backoff of getBackoffDelay (Client.swift) keeps Double.random
-/// for its other callers; the retry formulas of the refresh policy reuse this one when they land.
+/// for its other callers.
 internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: ClientRandom) -> UInt64 {
     let shift: Int = max(0, min(attempt, 62))
     let scaled: (partialValue: UInt64, overflow: Bool) = base.multipliedReportingOverflow(by: UInt64(1) << UInt64(shift))

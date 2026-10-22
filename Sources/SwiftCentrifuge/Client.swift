@@ -310,7 +310,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var reconnectAttempts = 0
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
-    internal var refreshRequired: Bool = false
+    fileprivate var refreshRequired: Bool = false
     fileprivate var pingTimer: DispatchWorkItem?
     fileprivate var pingInterval: UInt32 = 0
     fileprivate var sendPong: Bool = false
@@ -651,26 +651,21 @@ internal extension CentrifugeClient {
                             CentrifugeErrorEvent(error: CentrifugeError.refreshError(error: err))
                         )
                     }
-                    guard case CentrifugeError.replyError(let code, let message, let temporary) = err else {
-                        strongSelf.scheduleTimerRefreshRetry()
+                    switch refreshFailureAction(err) {
+                    case .keep:
                         return
-                    }
-                    if refreshKeepsConnection(code: code) {
-                        return
-                    }
-                    if refreshRetries(code: code, temporary: temporary) {
-                        if code == refreshRefusedExpiredCode {
+                    case .retry(let refusedExpired):
+                        if refusedExpired {
                             strongSelf.refreshState.refusedToken = token
                         }
                         strongSelf.scheduleTimerRefreshRetry()
                         return
+                    case .end(let code, let message):
+                        strongSelf.processDisconnect(code: code, reason: message, reconnect: false)
+                        return
                     }
-                    strongSelf.processDisconnect(code: code, reason: message, reconnect: false)
-                    return
                 }
                 if let res = result {
-                    strongSelf.refreshState.failures = 0
-                    strongSelf.refreshState.refusedToken = nil
                     strongSelf.acceptRefreshReply(res)
                 }
             })
@@ -1371,13 +1366,12 @@ internal extension CentrifugeClient {
             // and everything below - failUnauthorized (which runs processDisconnect,
             // asserted to be on syncQueue), the delegate callback, and rescheduling
             // the refresh - is only safe on syncQueue.
-            let generation: UInt64 = strongSelf.refreshState.generation
-            strongSelf.refreshState.timerFetchInFlight = true
+            let generation: UInt64 = strongSelf.beginTimerFetch()
             strongSelf.getConnectionToken(completion: { [weak self] result in
                 guard let strongSelf = self else { return }
-                strongSelf.refreshState.timerFetchInFlight = false
+                strongSelf.endTimerFetch()
                 // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
-                guard strongSelf.isCurrentConnection(transportId), strongSelf.refreshState.generation == generation else { return }
+                guard strongSelf.isCurrentConnection(transportId), !strongSelf.timerFetchIsSuperseded(generation) else { return }
                 switch result {
                 case .success(let token):
                     if token == "" {
@@ -1386,7 +1380,7 @@ internal extension CentrifugeClient {
                     }
                     // A token the server refused as expired is not sent again (stopOnRefusedToken): the
                     // connection is left to expire, and the next connect asks the getter.
-                    if refusedTokenIsNotResent(token: token, refused: strongSelf.refreshState.refusedToken, stopOnRefusedToken: strongSelf.config.stopOnRefusedToken) {
+                    if strongSelf.connectionTokenIsRefused(token) {
                         strongSelf.refreshRequired = true
                         return
                     }

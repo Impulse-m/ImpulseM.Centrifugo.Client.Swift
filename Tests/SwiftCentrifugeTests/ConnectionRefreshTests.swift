@@ -107,15 +107,6 @@ final class ConnectionRefreshTests: @unchecked Sendable {
         #expect(server.received().last(where: { $0.hasRefresh })?.refresh.token == "refreshed-token")
     }
 
-    /// Returns once every block enqueued on the client's queue before this call has run.
-    private func awaitSyncQueue(_ client: CentrifugeClient) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.syncQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
     /// The token getter's completion is called by the app on whatever thread it
     /// likes. The client must resume its own processing on syncQueue: an
     /// `unauthorized` failure disconnects, and processDisconnect asserts it runs

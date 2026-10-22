@@ -21,16 +21,6 @@ final class IdentityTests: @unchecked Sendable {
     }
 
 
-    /// Returns once every block enqueued on the client's queue before this call has run.
-    private func awaitSyncQueue(_ client: CentrifugeClient) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.syncQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
-
     /// Answers every refresh with the user in `users`, a ttl of 10 s and expiry set, so the
     /// connection refreshes again 10 s after each refresh.
     private func serveRefreshes(users: LockedBox<String>) {

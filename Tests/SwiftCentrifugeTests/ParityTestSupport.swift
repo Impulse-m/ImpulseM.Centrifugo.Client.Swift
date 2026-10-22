@@ -125,6 +125,82 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
 }
 
 
+/// Client delegate whose callbacks call the closures the test sets. The callbacks run on the client's queue.
+final class ClosureClientDelegate: CentrifugeClientDelegate, @unchecked Sendable {
+    var onConn: (() -> Void)?
+    var onErr: ((CentrifugeErrorEvent) -> Void)?
+    var onDisc: ((CentrifugeDisconnectedEvent) -> Void)?
+    var onAuthEvent: ((CentrifugeAuthEvent) -> Void)?
+
+
+    func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
+        onConn?()
+    }
+
+
+    func onError(_ client: CentrifugeClient, _ event: CentrifugeErrorEvent) {
+        onErr?(event)
+    }
+
+
+    func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {
+        onDisc?(event)
+    }
+
+
+    func onAuth(_ client: CentrifugeClient, _ event: CentrifugeAuthEvent) {
+        onAuthEvent?(event)
+    }
+}
+
+
+/// Subscription delegate whose callbacks call the closures the test sets. The callbacks run on the client's queue.
+final class ClosureSubscriptionDelegate: CentrifugeSubscriptionDelegate, @unchecked Sendable {
+    var onSub: (() -> Void)?
+    var onErr: ((CentrifugeSubscriptionErrorEvent) -> Void)?
+
+
+    func onSubscribed(_ subscription: CentrifugeSubscription, _ event: CentrifugeSubscribedEvent) {
+        onSub?()
+    }
+
+
+    func onUnsubscribed(_ subscription: CentrifugeSubscription, _ event: CentrifugeUnsubscribedEvent) {
+    }
+
+
+    func onError(_ subscription: CentrifugeSubscription, _ event: CentrifugeSubscriptionErrorEvent) {
+        onErr?(event)
+    }
+}
+
+
+/// Returns once every block enqueued on the client's queue before this call has run.
+func awaitSyncQueue(_ client: CentrifugeClient) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        client.syncQueue.async {
+            continuation.resume()
+        }
+    }
+}
+
+
+/// The number of timers armed on the manual clock so far that are not command timeouts.
+func nonLateTimerCount(_ scheduler: ManualScheduler) -> Int {
+    return scheduler.scheduledCalls.filter { (call: ScheduledCall) -> Bool in
+        return !call.lateGrace
+    }.count
+}
+
+
+/// The delay of the last timer armed on the manual clock that is not a command timeout.
+func lastNonLateTimerDelay(_ scheduler: ManualScheduler) -> TimeInterval? {
+    return scheduler.scheduledCalls.last(where: { (call: ScheduledCall) -> Bool in
+        return !call.lateGrace
+    })?.delay
+}
+
+
 /// A client together with the clock and the scheduler it was built with.
 struct ManualClientSetup {
     let client: CentrifugeClient

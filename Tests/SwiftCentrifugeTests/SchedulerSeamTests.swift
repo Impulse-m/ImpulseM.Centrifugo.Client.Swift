@@ -37,16 +37,6 @@ final class SchedulerSeamTests: @unchecked Sendable {
     }
 
 
-    /// Returns once every block enqueued on the client's queue before this call has run.
-    private func awaitSyncQueue(_ client: CentrifugeClient) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.syncQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
-
     @Test func manualSchedulerRunsDueItemsOnceAndKeepsTheRest() async {
         let queue: DispatchQueue = DispatchQueue(label: "scheduler-seam-test")
         let clock: ManualClock = ManualClock()

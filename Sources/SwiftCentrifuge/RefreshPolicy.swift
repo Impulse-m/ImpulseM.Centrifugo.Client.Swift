@@ -3,7 +3,7 @@ import Foundation
 // The retry policy of the timer refreshes: which server errors are retried, which keep the
 // connection, the delay of a retry, and the rule for a token the server refused as expired.
 // The functions are pure. The random source is the injected ClientRandom, so a test pins
-// the delays exactly.
+// the delays exactly. The connection and the subscription refresh both decide with these.
 
 /// The server code of a timer refresh refused as expired: the token the getter returned is refused.
 internal let refreshRefusedExpiredCode: UInt32 = 109
@@ -20,6 +20,18 @@ internal let refreshRetryMinimumSeconds: TimeInterval = 10
 internal let refreshRetryFirstCeilingSeconds: TimeInterval = 20
 
 
+/// What a failed timer refresh does next. The connection and a subscription decide it the same way.
+internal enum RefreshFailureAction {
+    /// Reported, not retried: the connection keeps its identity and token until they expire (103).
+    case keep
+    /// Retried after the backoff with a fresh token. `refusedExpired` is set for 109, so the token the server
+    /// refused can be remembered for stopOnRefusedToken.
+    case retry(refusedExpired: Bool)
+    /// The session ends with the server's code and message.
+    case end(code: UInt32, message: String)
+}
+
+
 /// Whether a failed timer refresh is retried with a fresh token: a client error (code below 100), a
 /// temporary error, and 109. Any other server error ends the connection, with the code.
 internal func refreshRetries(code: UInt32, temporary: Bool) -> Bool {
@@ -30,6 +42,21 @@ internal func refreshRetries(code: UInt32, temporary: Bool) -> Bool {
 /// Whether a failed timer refresh keeps the connection without a retry (103).
 internal func refreshKeepsConnection(code: UInt32) -> Bool {
     return code == refreshRefusedIdentityCode
+}
+
+
+/// Decides what a failed timer refresh does next. An error that is not a server reply is retried.
+internal func refreshFailureAction(_ error: Error) -> RefreshFailureAction {
+    guard case CentrifugeError.replyError(let code, let message, let temporary) = error else {
+        return .retry(refusedExpired: false)
+    }
+    if refreshKeepsConnection(code: code) {
+        return .keep
+    }
+    if refreshRetries(code: code, temporary: temporary) {
+        return .retry(refusedExpired: code == refreshRefusedExpiredCode)
+    }
+    return .end(code: code, message: message)
 }
 
 
@@ -56,4 +83,42 @@ internal func refusedTokenIsNotResent(token: String, refused: String?, stopOnRef
         return false
     }
     return token == refusedToken
+}
+
+
+internal extension CentrifugeClient {
+    /// Whether a timer refresh token is the one the server refused as expired, which is not sent again.
+    func connectionTokenIsRefused(_ token: String) -> Bool {
+        return refusedTokenIsNotResent(token: token, refused: refreshState.refusedToken, stopOnRefusedToken: config.stopOnRefusedToken)
+    }
+}
+
+
+internal extension CentrifugeSubscription {
+    /// Whether a timer refresh token of the subscription is the one the server refused as expired, which is not
+    /// sent again.
+    func subscriptionTokenIsRefused(_ token: String) -> Bool {
+        let stopOnRefusedToken: Bool = centrifuge?.config.stopOnRefusedToken ?? false
+        return refusedTokenIsNotResent(token: token, refused: refreshRefusedToken, stopOnRefusedToken: stopOnRefusedToken)
+    }
+
+    /// Arms the retry of a failed subscription refresh after the delay of its failure count, and moves the count on.
+    func scheduleSubscriptionRefreshRetry() {
+        guard let client: CentrifugeClient = centrifuge else {
+            return
+        }
+        let delay: TimeInterval = refreshRetryDelay(step: refreshFailures, tokenRetryCap: client.config.tokenRetryCap, random: client.random)
+        refreshFailures += 1
+        startSubscriptionRefresh(after: delay)
+    }
+
+    /// An accepted subscription refresh: the failure count and the refusal memory restart, and the refresh is armed
+    /// again at the expiry the server reports.
+    func subscriptionRefreshAccepted(expires: Bool, ttl: UInt32) {
+        refreshFailures = 0
+        refreshRefusedToken = nil
+        if expires {
+            startSubscriptionRefresh(after: Double(ttl))
+        }
+    }
 }

@@ -1,12 +1,15 @@
 import Foundation
 
 // The explicit token refresh, refresh(token:), and the state it shares with the timer refreshes of
-// Client.swift (table T4 of the parity spec). The calls run one at a time, in the order they were
-// made. Everything here runs on syncQueue.
+// Client.swift. The calls run one at a time, in the order they were made. Everything here runs on syncQueue.
 
 /// The most refresh() calls in progress at once, the one that runs included. Beyond it a call fails with
 /// `replyError(code: 16)`.
 internal let maxRefreshCalls: Int = 32
+
+/// The completion of one refresh() call.
+internal typealias RefreshCompletion = (Result<CentrifugeRefreshResult, Error>) -> Void
+
 
 /// The result of an accepted refresh: the expiry the server reports, and the identity it confirms.
 public struct CentrifugeRefreshResult {
@@ -20,7 +23,7 @@ public struct CentrifugeRefreshResult {
     public let authClass: String
 
 
-    public init(expires: Bool, ttl: UInt32, user: String, authClass: String) {
+    internal init(expires: Bool, ttl: UInt32, user: String, authClass: String) {
         self.expires = expires
         self.ttl = ttl
         self.user = user
@@ -35,14 +38,20 @@ internal final class RefreshCall {
     // The token of the call, nil when the token comes from the token getter.
     internal let token: String?
     // The completions of this call and of the calls that shared it.
-    internal var completions: [(Result<CentrifugeRefreshResult, Error>) -> Void]
+    internal var completions: [RefreshCompletion]
     // Whether the call put its token on the client before the server accepted it. Then the previous token is
     // put back when the server refuses the call, or when the client is disconnected for good.
     internal var holdsToken: Bool = false
     // The token the client had before the call put its own on it.
     internal var previousToken: String?
+    // The token the call put on the client while `holdsToken` is set. It is nil for a call without a token until
+    // the getter has given one.
+    internal var heldToken: String?
     // The token of the command that waits for the connection, nil when no command waits.
     internal var waitingToken: String?
+    // Whether the call was admitted while a timer token fetch was in flight. Its failure then arms the retry of
+    // that timer refresh, which the fetch no longer does.
+    internal var supersedesTimer: Bool = false
 
 
     internal init(token: String?, completion: @escaping (Result<CentrifugeRefreshResult, Error>) -> Void) {
@@ -62,14 +71,8 @@ internal final class RefreshState {
     // Moves on with each refresh() call admitted. A token fetch of a timer refresh that started before a move
     // is superseded: its token is not sent.
     internal var generation: UInt64 = 0
-    // Moves on with each refresh() call admitted that brings its own token. A token fetch of an explicit call
-    // that started before a move is superseded by that call.
-    internal var tokenCallGeneration: UInt64 = 0
     // Whether a token fetch of a timer refresh is in flight.
     internal var timerFetchInFlight: Bool = false
-    // Set when a refresh() call was admitted while a timer fetch was in flight. The refusal of that call then
-    // arms the retry of the timer refresh.
-    internal var timerSuperseded: Bool = false
     // The consecutive failed timer refreshes of the connection: the step of the next retry.
     internal var failures: Int = 0
     // The token the server refused as expired, for the stopOnRefusedToken rule.
@@ -121,14 +124,9 @@ internal extension CentrifugeClient {
             return
         }
         let call: RefreshCall = RefreshCall(token: token, completion: completion)
+        call.supersedesTimer = refreshState.timerFetchInFlight
         refreshState.calls.append(call)
         refreshState.generation += 1
-        if token != nil {
-            refreshState.tokenCallGeneration += 1
-        }
-        if refreshState.timerFetchInFlight {
-            refreshState.timerSuperseded = true
-        }
         if !refreshState.running {
             refreshState.running = true
             runFirstRefreshCall()
@@ -150,21 +148,15 @@ internal extension CentrifugeClient {
     }
 
 
-    /// Fetches the token of a call without one from the getter. A refresh() call with its own token admitted
-    /// meanwhile supersedes the fetch: the fetched token is not sent, and the call ends with the identity the
-    /// connection has.
+    /// Fetches the token of a call without one from the getter. The fetched token is sent, as any token of a
+    /// call: a call admitted meanwhile waits behind this one.
     func fetchRefreshToken(for call: RefreshCall) {
-        let tokenCalls: UInt64 = refreshState.tokenCallGeneration
         getConnectionToken(completion: { [weak self] result in
             guard let strongSelf: CentrifugeClient = self, strongSelf.refreshState.calls.first === call else {
                 return
             }
             switch result {
             case .success(let fetched):
-                if strongSelf.refreshState.tokenCallGeneration != tokenCalls {
-                    strongSelf.finishRefreshCall(call, outcome: .success(strongSelf.currentRefreshResult()))
-                    return
-                }
                 strongSelf.sendRefreshCall(call, token: fetched)
             case .failure(let error):
                 strongSelf.finishRefreshCall(call, outcome: .failure(error))
@@ -184,6 +176,7 @@ internal extension CentrifugeClient {
             if !call.holdsToken {
                 call.previousToken = self.token
                 call.holdsToken = true
+                call.heldToken = token
                 self.token = token
             }
             call.waitingToken = token
@@ -194,18 +187,12 @@ internal extension CentrifugeClient {
             guard let strongSelf: CentrifugeClient = self, strongSelf.refreshState.calls.first === call else {
                 return
             }
-            let superseded: Bool = strongSelf.refreshState.timerSuperseded
-            strongSelf.refreshState.timerSuperseded = false
             if let err = error {
-                if isServerRefusal(err) {
-                    if call.holdsToken && strongSelf.token == token {
-                        strongSelf.token = call.previousToken
-                    }
-                    call.holdsToken = false
-                    if superseded {
-                        strongSelf.scheduleTimerRefreshRetry()
-                    }
+                // A refusal puts back the previous token, when this call had put its own on the client.
+                if isServerRefusal(err) && call.holdsToken && strongSelf.token == call.heldToken {
+                    strongSelf.token = call.previousToken
                 }
+                call.holdsToken = false
                 strongSelf.finishRefreshCall(call, outcome: .failure(err))
                 return
             }
@@ -215,26 +202,25 @@ internal extension CentrifugeClient {
             }
             call.holdsToken = false
             strongSelf.token = token
-            strongSelf.refreshState.failures = 0
-            strongSelf.refreshState.refusedToken = nil
             strongSelf.acceptRefreshReply(res)
-            if !res.expires {
-                strongSelf.stopConnectionRefresh()
-            }
             strongSelf.finishRefreshCall(call, outcome: .success(CentrifugeRefreshResult(expires: res.expires, ttl: res.ttl, user: res.user, authClass: res.authClass)))
         })
     }
 
 
-    /// Settles the first call with the outcome, then starts the next one. The completions run inline, so a
-    /// completion may make another call; that call starts only when no call is running.
+    /// Settles the first call with the outcome, then starts the next one. A call that superseded a timer fetch and
+    /// fails while the connection is up arms the retry of the timer refresh: the fetch will not arm it. The completions
+    /// run inline, so a completion may make another call; that call starts only when no call is running.
     func finishRefreshCall(_ call: RefreshCall, outcome: Result<CentrifugeRefreshResult, Error>) {
         guard refreshState.calls.first === call else {
             return
         }
         refreshState.calls.removeFirst()
         refreshState.running = false
-        for completion in call.completions {
+        if call.supersedesTimer, self.state == .connected, case .failure(let error) = outcome, rearmsTimerAfter(error) {
+            scheduleTimerRefreshRetry()
+        }
+        for completion: RefreshCompletion in call.completions {
             completion(outcome)
         }
         if !refreshState.running, !refreshState.calls.isEmpty {
@@ -264,27 +250,32 @@ internal extension CentrifugeClient {
         let pending: [RefreshCall] = refreshState.calls
         refreshState.calls.removeAll()
         refreshState.running = false
-        for call in pending {
-            if call.holdsToken && self.token == call.token {
+        for call: RefreshCall in pending {
+            if call.holdsToken && self.token == call.heldToken {
                 self.token = call.previousToken
             }
             call.holdsToken = false
             call.waitingToken = nil
-            for completion in call.completions {
+            for completion: RefreshCompletion in call.completions {
                 completion(.failure(CentrifugeError.clientDisconnected))
             }
         }
     }
 
 
-    /// Applies an accepted refresh reply to the connection: the identity, and the timer from the new expiry. The
-    /// caller has set the token and the failure count.
+    /// Applies an accepted refresh reply to the connection: the failure count and the refusal memory restart, the
+    /// identity is updated, and the timer is armed from the new expiry, or stopped when the server reports none.
+    /// The caller has set the token.
     func acceptRefreshReply(_ res: Centrifugal_Centrifuge_Protocol_RefreshResult) {
+        refreshState.failures = 0
+        refreshState.refusedToken = nil
         if identity.applyRefresh(user: res.user, authClass: res.authClass) {
             delegate?.onAuth(self, CentrifugeAuthEvent(user: identity.user, authClass: identity.authClass))
         }
         if res.expires {
             startConnectionRefresh(after: Double(res.ttl))
+        } else {
+            stopConnectionRefresh()
         }
     }
 
@@ -297,10 +288,38 @@ internal extension CentrifugeClient {
     }
 
 
-    /// The result that a call without a token gets when a refresh() call superseded its fetch: the identity the
-    /// connection has, and no expiry.
-    func currentRefreshResult() -> CentrifugeRefreshResult {
-        return CentrifugeRefreshResult(expires: false, ttl: 0, user: identity.user, authClass: identity.authClass)
+    /// Marks a timer token fetch as in flight. Returns the generation the fetch starts in: a refresh() call admitted
+    /// before the fetch completes moves the generation on, and supersedes the fetch.
+    func beginTimerFetch() -> UInt64 {
+        refreshState.timerFetchInFlight = true
+        return refreshState.generation
+    }
+
+
+    /// Marks the timer token fetch as finished.
+    func endTimerFetch() {
+        refreshState.timerFetchInFlight = false
+    }
+
+
+    /// Whether a refresh() call was admitted after the timer fetch that started in `generation`.
+    func timerFetchIsSuperseded(_ generation: UInt64) -> Bool {
+        return refreshState.generation != generation
+    }
+}
+
+
+/// Whether a failed call that superseded a timer fetch arms the retry of that timer refresh. A loss of the
+/// connection does not: its reconnect arms the timer again.
+private func rearmsTimerAfter(_ error: Error) -> Bool {
+    guard let centrifugeError: CentrifugeError = error as? CentrifugeError else {
+        return true
+    }
+    switch centrifugeError {
+    case .clientDisconnected, .connectionClosed:
+        return false
+    default:
+        return true
     }
 }
 

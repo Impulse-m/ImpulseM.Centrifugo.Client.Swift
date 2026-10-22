@@ -111,8 +111,8 @@ public class CentrifugeSubscription: @unchecked Sendable {
     fileprivate var resubscribeTask: DispatchWorkItem?
     fileprivate var resubscribeAttempts: Int = 0
     // Consecutive failed refreshes of the token, and the token the server refused as expired.
-    fileprivate var refreshFailures: Int = 0
-    fileprivate var refreshRefusedToken: String?
+    internal var refreshFailures: Int = 0
+    internal var refreshRefusedToken: String?
     // Identifies the current subscribe attempt, or the current subscribed session.
     // Changes on every subscribe attempt and every state change; token and state
     // requests, subscribe replies and refresh steps check it and are dropped when
@@ -126,7 +126,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
     var config: CentrifugeSubscriptionConfig
     
     private var callbacks: [String: ((Error?) -> ())] = [:]
-    private weak var centrifuge: CentrifugeClient?
+    internal weak var centrifuge: CentrifugeClient?
     private let log: CentrifugeLogger
     
     init(centrifuge: CentrifugeClient, channel: String, config: CentrifugeSubscriptionConfig, delegate: CentrifugeSubscriptionDelegate, log: CentrifugeLogger) {
@@ -469,7 +469,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
         return self.attempt == attempt && self.state == .subscribed
     }
 
-    private func startSubscriptionRefresh(after delay: TimeInterval) {
+    func startSubscriptionRefresh(after delay: TimeInterval) {
         // One refresh chain per subscribed session: a new step replaces the pending
         // one, and the chain stops at its next step once the session it was started
         // for is over (a resubscribe starts its own chain).
@@ -488,8 +488,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
                             return
                         }
                         // A token the server refused as expired is not sent again (stopOnRefusedToken).
-                        let stopOnRefusedToken: Bool = strongSelf.centrifuge?.config.stopOnRefusedToken ?? false
-                        if refusedTokenIsNotResent(token: token, refused: strongSelf.refreshRefusedToken, stopOnRefusedToken: stopOnRefusedToken) {
+                        if strongSelf.subscriptionTokenIsRefused(token) {
                             return
                         }
                         strongSelf.refreshWithToken(token: token, attempt: attempt)
@@ -520,16 +519,6 @@ public class CentrifugeSubscription: @unchecked Sendable {
         self.refreshTask = refreshTask
     }
 
-    /// Arms the retry of a failed subscription refresh after the delay of its failure count, and moves the count on.
-    private func scheduleSubscriptionRefreshRetry() {
-        guard let client: CentrifugeClient = self.centrifuge else {
-            return
-        }
-        let delay: TimeInterval = refreshRetryDelay(step: refreshFailures, tokenRetryCap: client.config.tokenRetryCap, random: client.random)
-        refreshFailures += 1
-        startSubscriptionRefresh(after: delay)
-    }
-
     func refreshWithToken(token: String, attempt: UInt64) {
         self.centrifuge?.syncQueue.async { [weak self] in
             guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
@@ -538,31 +527,28 @@ public class CentrifugeSubscription: @unchecked Sendable {
                 guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
                 guard strongSelf.centrifuge != nil else { return }
                 if let err = error {
-                    switch err {
-                    case CentrifugeError.replyError(let code, let message, let temporary):
-                        if refreshKeepsConnection(code: code) {
-                            // Reported, not retried: the subscription keeps its token until it expires.
-                            strongSelf.delegate?.onError(
-                                strongSelf,
-                                CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionRefreshError(error: err))
-                            )
-                            return
-                        }
-                        if !refreshRetries(code: code, temporary: temporary) {
-                            self?.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
-                            return
-                        }
-                        if code == refreshRefusedExpiredCode {
+                    // processDisconnect fails pending replies just before it
+                    // moves this subscription to subscribing, which cancels the
+                    // refresh; the resubscribe starts a new one. Not a refresh
+                    // failure worth reporting.
+                    if case CentrifugeError.clientDisconnected = err {
+                        return
+                    }
+                    switch refreshFailureAction(err) {
+                    case .keep:
+                        // Reported, not retried: the subscription keeps its token until it expires.
+                        strongSelf.delegate?.onError(
+                            strongSelf,
+                            CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionRefreshError(error: err))
+                        )
+                        return
+                    case .end(let code, let message):
+                        self?.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
+                        return
+                    case .retry(let refusedExpired):
+                        if refusedExpired {
                             strongSelf.refreshRefusedToken = token
                         }
-                    case CentrifugeError.clientDisconnected:
-                        // processDisconnect fails pending replies just before it
-                        // moves this subscription to subscribing, which cancels the
-                        // refresh; the resubscribe starts a new one. Not a refresh
-                        // failure worth reporting.
-                        return
-                    default:
-                        break
                     }
                     // Retry with backoff. Scheduled before the callout because
                     // delegate callbacks run inline and may re-enter the client.
@@ -574,11 +560,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
                     return
                 }
                 if let res = result {
-                    strongSelf.refreshFailures = 0
-                    strongSelf.refreshRefusedToken = nil
-                    if res.expires {
-                        strongSelf.startSubscriptionRefresh(after: Double(res.ttl))
-                    }
+                    strongSelf.subscriptionRefreshAccepted(expires: res.expires, ttl: res.ttl)
                 }
             })
         }

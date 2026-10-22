@@ -2,36 +2,13 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-// The explicit refresh, refresh(token:), and the retry rules of the timer refreshes (tables T4 and T5 of
-// the parity spec). The timer refreshes run on the test clock: `advance(by:)` fires them, and the delay of a
-// retry is read from the scheduler's record. A wait is on a server arrival or a delegate callback, never on time.
-
-/// Delegate of these tests: each callback calls the closure the test set.
-private final class RefreshDelegate: CentrifugeClientDelegate, @unchecked Sendable {
-    var onConn: (() -> Void)?
-    var onErr: ((CentrifugeErrorEvent) -> Void)?
-    var onDisc: ((CentrifugeDisconnectedEvent) -> Void)?
-    var onAuthEvent: ((CentrifugeAuthEvent) -> Void)?
+// The explicit refresh, refresh(token:), and the retry rules of the timer refreshes. The timer refreshes run on
+// the test clock: `advance(by:)` fires them, and the delay of a retry is read from the scheduler's record. A wait
+// is on a server arrival or a delegate callback, never on time.
 
 
-    func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
-        onConn?()
-    }
-
-
-    func onError(_ client: CentrifugeClient, _ event: CentrifugeErrorEvent) {
-        onErr?(event)
-    }
-
-
-    func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {
-        onDisc?(event)
-    }
-
-
-    func onAuth(_ client: CentrifugeClient, _ event: CentrifugeAuthEvent) {
-        onAuthEvent?(event)
-    }
+/// A failure of a token getter in these tests.
+private struct FetchFailure: Error {
 }
 
 
@@ -88,16 +65,6 @@ final class RefreshTests: @unchecked Sendable {
     }
 
 
-    /// Returns once every block enqueued on the client's queue before this call has run.
-    private func awaitSyncQueue(_ client: CentrifugeClient) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.syncQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
-
     /// The tokens of the refresh commands the server received, in order.
     private func refreshTokens() -> [String] {
         return server.received().filter(\.hasRefresh).map(\.refresh.token)
@@ -113,8 +80,9 @@ final class RefreshTests: @unchecked Sendable {
 
 
     /// Connects a client on the manual clock. With `ttl`, the connect result says the token expires after that many
-    /// seconds, so the timer refresh is armed. Returns once the client is connected and its timer is armed.
-    private func startClient(_ config: CentrifugeClientConfig, delegate: RefreshDelegate, ttl: UInt32?) async -> ManualClientSetup {
+    /// seconds, so the timer refresh is armed. `draw` is the random source's position in each range. Returns once the
+    /// client is connected and its timer is armed.
+    private func startClient(_ config: CentrifugeClientConfig, delegate: ClosureClientDelegate, ttl: UInt32?, draw: Double = 0) async -> ManualClientSetup {
         if let expiry: UInt32 = ttl {
             server.connectResult.expires = true
             server.connectResult.ttl = expiry
@@ -123,7 +91,7 @@ final class RefreshTests: @unchecked Sendable {
         delegate.onConn = {
             connected.fulfill()
         }
-        let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate, random: ManualRandom(draw: 0))
+        let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate, random: ManualRandom(draw: draw))
         setup.client.connect()
         await fulfillment(of: [connected], within: 5)
         // onConnected runs before the connect handler arms the timer, on the same queue block.
@@ -155,7 +123,7 @@ final class RefreshTests: @unchecked Sendable {
             return acceptedReply(to: command)
         }
         let reported: Expectation = Expectation("refresh error reported")
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         delegate.onErr = { (event: CentrifugeErrorEvent) in
             if case CentrifugeError.refreshError = event.error {
                 reported.fulfill()
@@ -164,9 +132,7 @@ final class RefreshTests: @unchecked Sendable {
         let setup: ManualClientSetup = await startClient(tokenConfig(tokenSequence(["T1", "T2"])), delegate: delegate, ttl: 10)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [reported], within: 5)
-        let delay: TimeInterval? = setup.scheduler.scheduledCalls.last(where: { (call: ScheduledCall) -> Bool in
-            return !call.lateGrace
-        })?.delay
+        let delay: TimeInterval? = lastNonLateTimerDelay(setup.scheduler)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [retried], within: 5)
         withExtendedLifetime(delegate) {}
@@ -176,7 +142,7 @@ final class RefreshTests: @unchecked Sendable {
 
     @Test func refreshBeyondThe32InProgressIsRefusedWithLimitExceeded() async {
         // Not connected: every call waits for a connection, so none settles, and the 33rd is refused at once.
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         let client: CentrifugeClient = CentrifugeClient(endpoint: server.url, config: CentrifugeClientConfig(), delegate: delegate)
         for index: Int in 0 ..< maxRefreshCalls {
             client.refresh(token: "token-\(index)") { (_: Result<CentrifugeRefreshResult, Error>) in }
@@ -205,6 +171,112 @@ final class RefreshTests: @unchecked Sendable {
     }
 
 
+    @Test func tokenLessCallSendsItsTokenBeforeALaterCall() async {
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            guard command.hasRefresh else {
+                return nil
+            }
+            return acceptedReply(to: command)
+        }
+        // The test completes the getter's fetch by hand, so the later call is admitted while the fetch is pending.
+        let fetches: EventCounter = EventCounter()
+        let completions: LockedBox<[(Result<String, Error>) -> Void]> = LockedBox([])
+        let getter: CentrifugeConnectionTokenGetter = { (_: CentrifugeConnectionTokenEvent, completion: @escaping (Result<String, Error>) -> Void) in
+            completions.update { (values: inout [(Result<String, Error>) -> Void]) in
+                values.append(completion)
+            }
+            fetches.record()
+        }
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "initial"
+        config.tokenGetter = getter
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: nil)
+
+        let first: Expectation = Expectation("token-less call succeeded")
+        let second: Expectation = Expectation("call with a token succeeded")
+        let order: LockedBox<[String]> = LockedBox([])
+        setup.client.refresh { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .success = result {
+                order.update { (values: inout [String]) in
+                    values.append("token-less")
+                }
+                first.fulfill()
+            }
+        }
+        await fetches.awaitCount(times: 1)
+        setup.client.refresh(token: "B") { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .success = result {
+                order.update { (values: inout [String]) in
+                    values.append("B")
+                }
+                second.fulfill()
+            }
+        }
+        let fetched: (Result<String, Error>) -> Void = completions.current[0]
+        fetched(.success("A-token"))
+        await fulfillment(of: [first, second], within: 5)
+        // The fetched token of the first call is sent before the token of the later call.
+        #expect(refreshTokens() == ["A-token", "B"])
+        #expect(order.current == ["token-less", "B"])
+        withExtendedLifetime(delegate) {}
+    }
+
+
+    @Test func acceptedExplicitRefreshUpdatesTheIdentityAndTheTimer() async {
+        server.connectResult.user = "alice"
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            guard command.hasRefresh else {
+                return nil
+            }
+            var reply: Centrifugal_Centrifuge_Protocol_Reply = Centrifugal_Centrifuge_Protocol_Reply()
+            reply.id = command.id
+            reply.refresh.expires = true
+            reply.refresh.ttl = 30
+            reply.refresh.user = "bob"
+            return reply
+        }
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let identities: LockedBox<[String]> = LockedBox([])
+        delegate.onAuthEvent = { (event: CentrifugeAuthEvent) in
+            identities.update { (values: inout [String]) in
+                values.append(event.user)
+            }
+        }
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "initial"
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: nil)
+
+        let accepted: Expectation = Expectation("refresh accepted")
+        setup.client.refresh(token: "new-token") { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .success(let refreshed) = result, refreshed.expires, refreshed.ttl == 30, refreshed.user == "bob" {
+                accepted.fulfill()
+            }
+        }
+        await fulfillment(of: [accepted], within: 5)
+        // The connect reported alice; the refresh changes the user once.
+        #expect(identities.current == ["alice", "bob"])
+        // The timer is armed from the ttl of the accepted refresh.
+        #expect(lastNonLateTimerDelay(setup.scheduler) == 30)
+
+        // The next connect carries the accepted token.
+        let disconnected: Expectation = Expectation("disconnected")
+        delegate.onDisc = { (_: CentrifugeDisconnectedEvent) in
+            disconnected.fulfill()
+        }
+        setup.client.disconnect()
+        await fulfillment(of: [disconnected], within: 5)
+        let reconnected: Expectation = Expectation("reconnected")
+        delegate.onConn = {
+            reconnected.fulfill()
+        }
+        setup.client.connect()
+        await fulfillment(of: [reconnected], within: 5)
+        #expect(server.received().filter(\.hasConnect).map(\.connect.token) == ["initial", "new-token"])
+        withExtendedLifetime(delegate) {}
+    }
+
+
     @Test func refusedRefreshKeepsTheIdentityAndTheToken() async {
         server.connectResult.user = "alice"
         server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
@@ -213,7 +285,7 @@ final class RefreshTests: @unchecked Sendable {
             }
             return errorReply(to: command, code: 103, temporary: false)
         }
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         let identities: LockedBox<[String]> = LockedBox([])
         delegate.onAuthEvent = { (event: CentrifugeAuthEvent) in
             identities.update { (values: inout [String]) in
@@ -258,7 +330,7 @@ final class RefreshTests: @unchecked Sendable {
             }
             return errorReply(to: command, code: 103, temporary: false)
         }
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         var config: CentrifugeClientConfig = CentrifugeClientConfig()
         config.token = "initial"
         let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: nil)
@@ -302,6 +374,84 @@ final class RefreshTests: @unchecked Sendable {
     }
 
 
+    @Test func refusalAfterASupersedingCallThatFailedLocallyArmsNoRetry() async {
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            guard command.hasRefresh else {
+                return nil
+            }
+            return errorReply(to: command, code: 25, temporary: false)
+        }
+        // The test completes each getter fetch by hand: the timer fetch first, then the explicit call's fetch.
+        let fetches: EventCounter = EventCounter()
+        let completions: LockedBox<[(Result<String, Error>) -> Void]> = LockedBox([])
+        let getter: CentrifugeConnectionTokenGetter = { (_: CentrifugeConnectionTokenEvent, completion: @escaping (Result<String, Error>) -> Void) in
+            completions.update { (values: inout [(Result<String, Error>) -> Void]) in
+                values.append(completion)
+            }
+            fetches.record()
+        }
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let setup: ManualClientSetup = await startClient(tokenConfig(getter), delegate: delegate, ttl: 10)
+
+        await setup.scheduler.advance(by: 10)
+        await fetches.awaitCount(times: 1)
+        // The timer fetch is in flight. A refresh() without a token supersedes it and fetches its own token.
+        let failed: Expectation = Expectation("explicit call failed locally")
+        setup.client.refresh { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .failure = result {
+                failed.fulfill()
+            }
+        }
+        await fetches.awaitCount(times: 2)
+        let armedBeforeFailure: Int = nonLateTimerCount(setup.scheduler)
+        let explicitFetch: (Result<String, Error>) -> Void = completions.current[1]
+        explicitFetch(.failure(FetchFailure()))
+        await fulfillment(of: [failed], within: 5)
+        // The superseding call failed locally with the connection up, so the timer refresh is retried once.
+        #expect(nonLateTimerCount(setup.scheduler) == armedBeforeFailure + 1)
+
+        // The superseded timer fetch ends later: its token is dropped, and nothing is armed.
+        let timerFetch: (Result<String, Error>) -> Void = completions.current[0]
+        timerFetch(.success("timer-token"))
+        await awaitSyncQueue(setup.client)
+        let armedBeforeRefusal: Int = nonLateTimerCount(setup.scheduler)
+
+        // A refusal of a later call that superseded nothing arms no retry.
+        let refused: Expectation = Expectation("unrelated refresh refused")
+        setup.client.refresh(token: "unrelated") { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .failure = result {
+                refused.fulfill()
+            }
+        }
+        await fulfillment(of: [refused], within: 5)
+        #expect(nonLateTimerCount(setup.scheduler) == armedBeforeRefusal)
+        #expect(refreshTokens() == ["unrelated"])
+        withExtendedLifetime(delegate) {}
+    }
+
+
+    @Test func timerRefreshRefusedWithAnotherCodeDisconnectsWithIt() async {
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            guard command.hasRefresh else {
+                return nil
+            }
+            return errorReply(to: command, code: 3500, temporary: false)
+        }
+        let disconnected: Expectation = Expectation("disconnected with the refusal code")
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        delegate.onDisc = { (event: CentrifugeDisconnectedEvent) in
+            if event.code == 3500 {
+                disconnected.fulfill()
+            }
+        }
+        let setup: ManualClientSetup = await startClient(tokenConfig(tokenSequence(["T1"])), delegate: delegate, ttl: 10)
+        await setup.scheduler.advance(by: 10)
+        await fulfillment(of: [disconnected], within: 5)
+        #expect(setup.client.state == .disconnected)
+        withExtendedLifetime(delegate) {}
+    }
+
+
     @Test func refusedTimerRefreshKeepsTheConnection() async {
         server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
             guard command.hasRefresh else {
@@ -310,7 +460,7 @@ final class RefreshTests: @unchecked Sendable {
             return errorReply(to: command, code: 103, temporary: false)
         }
         let reported: Expectation = Expectation("refresh error reported")
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         delegate.onErr = { (event: CentrifugeErrorEvent) in
             if case CentrifugeError.refreshError = event.error {
                 reported.fulfill()
@@ -332,7 +482,7 @@ final class RefreshTests: @unchecked Sendable {
             return errorReply(to: command, code: 103, temporary: false)
         }
         let reported: Expectation = Expectation("refresh error reported")
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         delegate.onErr = { (event: CentrifugeErrorEvent) in
             if case CentrifugeError.refreshError = event.error {
                 reported.fulfill()
@@ -350,28 +500,6 @@ final class RefreshTests: @unchecked Sendable {
             return call.lateGrace
         })
         #expect(refreshTokens().count == 1)
-        withExtendedLifetime(delegate) {}
-    }
-
-
-    @Test func timerRefreshRefusedWithAnotherCodeDisconnectsWithIt() async {
-        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
-            guard command.hasRefresh else {
-                return nil
-            }
-            return errorReply(to: command, code: 3500, temporary: false)
-        }
-        let disconnected: Expectation = Expectation("disconnected with the refusal code")
-        let delegate: RefreshDelegate = RefreshDelegate()
-        delegate.onDisc = { (event: CentrifugeDisconnectedEvent) in
-            if event.code == 3500 {
-                disconnected.fulfill()
-            }
-        }
-        let setup: ManualClientSetup = await startClient(tokenConfig(tokenSequence(["T1"])), delegate: delegate, ttl: 10)
-        await setup.scheduler.advance(by: 10)
-        await fulfillment(of: [disconnected], within: 5)
-        #expect(setup.client.state == .disconnected)
         withExtendedLifetime(delegate) {}
     }
 
@@ -410,7 +538,7 @@ final class RefreshTests: @unchecked Sendable {
         var config: CentrifugeClientConfig = tokenConfig(tokenSequence(["T1"]))
         // A short reply timeout: the dropped refresh fails with a timeout, which is a transport error for the retry rule.
         config.timeout = 2
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: 10)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [dropped], within: 5)
@@ -419,10 +547,7 @@ final class RefreshTests: @unchecked Sendable {
         server.dropCommand = nil
         await setup.scheduler.advance(by: 2)
         // The retry is armed with the same backoff as a refusal: 10 s with draw 0.
-        let delay: TimeInterval? = setup.scheduler.scheduledCalls.last(where: { (call: ScheduledCall) -> Bool in
-            return !call.lateGrace
-        })?.delay
-        #expect(delay == 10)
+        #expect(lastNonLateTimerDelay(setup.scheduler) == 10)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [retried], within: 5)
         withExtendedLifetime(delegate) {}
@@ -438,7 +563,8 @@ final class RefreshTests: @unchecked Sendable {
         }
         let reported: Expectation = Expectation("refresh error reported")
         let refetched: Expectation = Expectation("retry fetched the token again")
-        let delegate: RefreshDelegate = RefreshDelegate()
+        let refetchedOnConnect: Expectation = Expectation("connect fetched a token again")
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
         delegate.onErr = { (event: CentrifugeErrorEvent) in
             if case CentrifugeError.refreshError = event.error {
                 reported.fulfill()
@@ -448,15 +574,36 @@ final class RefreshTests: @unchecked Sendable {
             if count == 2 {
                 refetched.fulfill()
             }
+            if count == 3 {
+                refetchedOnConnect.fulfill()
+            }
         })
         let setup: ManualClientSetup = await startClient(tokenConfig(getter), delegate: delegate, ttl: 10)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [reported], within: 5)
+        // The refusal armed the retry (10 s at draw 0). The retry fetches the refused token again: it is not sent, and
+        // no timer is armed after it.
+        let armedBeforeRetry: Int = nonLateTimerCount(setup.scheduler)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [refetched], within: 5)
         // The fetch ran and its decision is on the queue before this block: the refused token was not sent.
         await awaitSyncQueue(setup.client)
         #expect(refreshTokens() == ["T1"])
+        #expect(nonLateTimerCount(setup.scheduler) == armedBeforeRetry)
+
+        // The skipped token leaves the refresh required: the next connect fetches a token from the getter.
+        let disconnected: Expectation = Expectation("disconnected")
+        delegate.onDisc = { (_: CentrifugeDisconnectedEvent) in
+            disconnected.fulfill()
+        }
+        setup.client.disconnect()
+        await fulfillment(of: [disconnected], within: 5)
+        let reconnected: Expectation = Expectation("reconnected")
+        delegate.onConn = {
+            reconnected.fulfill()
+        }
+        setup.client.connect()
+        await fulfillment(of: [reconnected, refetchedOnConnect], within: 5)
         withExtendedLifetime(delegate) {}
     }
 }
