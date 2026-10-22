@@ -53,29 +53,18 @@ jobs:
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
-        run: |
-          # Under a pseudo-terminal the test output is line-buffered, so the last
-          # "started" line before a crash names the crashing test.
-          set +e
-          script -q /dev/null ./scripts/test.sh --verbose 2>&1 | tee test-output.log
-          code=${PIPESTATUS[0]}
-          echo "---- last test events ----"
-          grep -E "started|passed|failed|Fatal|fatal" test-output.log | tail -20
-          exit "$code"
+        run: ./scripts/test.sh --verbose
       - name: Run each rpc test alone on failure
         if: failure()
         run: |
           grep -oE 'func [A-Za-z0-9_]+' Tests/SwiftCentrifugeTests/RpcTrackerTests.swift | sed -E 's/^func //' | sort -u > rpc_tests.txt
           wc -l < rpc_tests.txt
-          first=1
           while read -r t; do
             code=0
             swift test --skip-build --filter "RpcTrackerTests/$t" > one.log 2>&1 || code=$?
             echo "[$code] $t"
-            if [ "$code" -ne 0 ] && [ "$first" -eq 1 ]; then
-              first=0
-              head -5 one.log
-              tail -5 one.log
+            if [ "$code" -ne 0 ]; then
+              grep -E "Fatal|fatal|error:|Expectation|✘" one.log | head -8
             fi
           done < rpc_tests.txt
       - name: Show Centrifugo log on failure
