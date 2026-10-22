@@ -57,7 +57,7 @@ jobs:
       - name: Run each rpc test alone on failure
         if: failure()
         run: |
-          swift test list 2>/dev/null | grep 'RpcTrackerTests' | sed -E 's/.*RpcTrackerTests[./]//; s/\(.*//' | sort -u > rpc_tests.txt
+          grep -oE 'func [A-Za-z0-9_]+' Tests/SwiftCentrifugeTests/RpcTrackerTests.swift | sed -E 's/^func //' | sort -u > rpc_tests.txt
           wc -l < rpc_tests.txt
           while read -r t; do
             code=0
