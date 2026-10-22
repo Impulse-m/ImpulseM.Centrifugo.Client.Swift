@@ -1,11 +1,11 @@
 import Foundation
 
-// The server time of a client (parity spec F4). A command reply carries the server's Unix time
+// The server time of a client. A command reply carries the server's Unix time
 // in `Reply.time`. The client keeps the offset of that time from its own wall clock, and the
 // server time is the local wall clock plus the offset. A reply without a time keeps the last
 // offset. Before any reply the offset is zero, so the server time is the local time.
 //
-// The server is untrusted input (lead rulings, security review of slice 3). A reply time more
+// The server is untrusted input. A reply time more
 // than 365 days from the local clock is ignored, and every subtraction and addition reports
 // overflow instead of trapping, so a hostile time cannot crash the app.
 

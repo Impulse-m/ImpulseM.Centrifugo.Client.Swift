@@ -153,6 +153,14 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
     }
 
 
+    /// Moves the clock by `delta` and runs nothing: a due item stays pending until the next `advance`.
+    /// A test uses it to put a call past its deadline before the timer runs, so the handling of a
+    /// reply that arrives in between can be checked. The clock moves exactly as in `advance(by:)`.
+    func passTime(by delta: TimeInterval) {
+        clock.advance(by: delta)
+    }
+
+
     private func runDueItems() {
         while let item: DispatchWorkItem = takeNextDue() {
             item.perform()

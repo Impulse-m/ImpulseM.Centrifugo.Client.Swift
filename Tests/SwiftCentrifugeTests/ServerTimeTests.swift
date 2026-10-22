@@ -46,7 +46,7 @@ final class ServerTimeTests: @unchecked Sendable {
         client.rpc(method: "method", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             done.fulfill()
         }
-        await fulfillment(of: [done], within: 5)
+        await parityFulfillment(of: [done], within: 5, sourceLocation: #_sourceLocation)
     }
 
 
@@ -67,7 +67,7 @@ final class ServerTimeTests: @unchecked Sendable {
         let serverTime: Int64 = setup.clock.wallMillis() + 500
         replyTime.set(serverTime)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         await runRpc(setup.client)
         #expect(setup.client.serverTimeMillis() == serverTime, "the offset is the reply time minus the local time")
@@ -86,7 +86,7 @@ final class ServerTimeTests: @unchecked Sendable {
         let serverTime: Int64 = setup.clock.wallMillis() + 500
         replyTime.set(serverTime)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         await runRpc(setup.client)
         replyTime.set(0)
@@ -108,7 +108,7 @@ final class ServerTimeTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected, messageArrived: messageArrived)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: CentrifugeClientConfig(), delegate: delegate)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         var push: Centrifugal_Centrifuge_Protocol_Push = Centrifugal_Centrifuge_Protocol_Push()
         push.message = Centrifugal_Centrifuge_Protocol_Message()
@@ -116,7 +116,7 @@ final class ServerTimeTests: @unchecked Sendable {
         pushReply.time = setup.clock.wallMillis() + 500
         pushReply.push = push
         server.sendReply(pushReply)
-        await fulfillment(of: [messageArrived], within: 5)
+        await parityFulfillment(of: [messageArrived], within: 5, sourceLocation: #_sourceLocation)
         #expect(setup.client.serverTimeMillis() == setup.clock.wallMillis(), "a push with a time does not set the offset")
 
         let serverTime: Int64 = setup.clock.wallMillis() + 500
@@ -137,7 +137,7 @@ final class ServerTimeTests: @unchecked Sendable {
         let serverTime: Int64 = setup.clock.wallMillis() + 500
         replyTime.set(serverTime)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         await runRpc(setup.client)
         #expect(setup.client.serverTimeMillis() == serverTime)
@@ -172,15 +172,15 @@ final class ServerTimeTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: CentrifugeClientConfig(), delegate: delegate)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         let expired: Expectation = Expectation("rpc timed out")
         setup.client.rpc(method: "method", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
             expired.fulfill()
         }
-        await fulfillment(of: [dropped], within: 5)
+        await parityFulfillment(of: [dropped], within: 5, sourceLocation: #_sourceLocation)
         await setup.scheduler.advance(by: setup.client.config.timeout)
-        await fulfillment(of: [expired], within: 5)
+        await parityFulfillment(of: [expired], within: 5, sourceLocation: #_sourceLocation)
 
         var late: Centrifugal_Centrifuge_Protocol_Reply = Centrifugal_Centrifuge_Protocol_Reply()
         late.id = droppedId.current

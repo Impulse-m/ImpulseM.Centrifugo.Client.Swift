@@ -86,7 +86,7 @@ Codes 15 to 19 are reserved for client-local errors of the fork SDKs; a server n
 
 | Code | Swift form | Meaning |
 |---|---|---|
-| 10 | `transportWriteError(error:)` | The request could not be encoded, so the call was not sent. It does not report a transport write failure: the transport gives no write error signal. |
+| 10 | `transportWriteError(error:)` | Reserved. No protobuf request of the client can fail to encode, and the transport gives no write error signal, so the client does not produce it today. |
 | 11 | `connectionClosed` | The connection was lost while the call was on it, and the call cannot be resent on the next one. |
 | 12 | `configurationError(message:)` | The configuration cannot work, for example a refresh with no token and no getter, or an invalid instance. |
 | 15 | `replyError(code: 15, ...)` | The call was not sent: the connection cannot carry what it asks for (headers). |

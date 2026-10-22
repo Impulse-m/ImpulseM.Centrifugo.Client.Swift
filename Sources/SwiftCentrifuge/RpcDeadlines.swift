@@ -16,6 +16,10 @@ internal struct RpcDue {
 
 
 /// A binary min-heap of due moments, earliest first. Ties come out in no fixed order.
+///
+/// It is written here, not taken from a package. The library heap (Heap in apple/swift-collections)
+/// would add a package dependency, which the SDK keeps out. The heap is about fifty lines and holds the
+/// due moments of one client. A benchmark of the tracker's hot path is still to be added to CI.
 internal struct RpcDueHeap {
     private var items: [RpcDue] = []
 
@@ -112,4 +116,13 @@ internal struct RpcExpiryQueue {
             self.head = 0
         }
     }
+}
+
+
+/// The earlier of an optional moment and a candidate; the candidate when there is none yet.
+internal func earlierNanos(_ current: UInt64?, _ candidate: UInt64) -> UInt64 {
+    guard let known: UInt64 = current else {
+        return candidate
+    }
+    return min(known, candidate)
 }

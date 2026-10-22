@@ -85,7 +85,7 @@ final class InstanceTests: @unchecked Sendable {
                 failed.fulfill()
             }
         }
-        await fulfillment(of: [failed], within: 5)
+        await parityFulfillment(of: [failed], within: 5, sourceLocation: #_sourceLocation)
         #expect(delegate.reportedErrors.count == 1, "connect() reports the error once")
         #expect(server.received().isEmpty, "nothing is sent for an invalid configuration")
         withExtendedLifetime(delegate) {}
@@ -102,7 +102,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         let lines: [String] = logger.all
         let leaked: [String] = lines.filter { (line: String) -> Bool in
@@ -122,7 +122,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: config, delegate: delegate)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         let request: Centrifugal_Centrifuge_Protocol_ConnectRequest? = connectRequest()
         #expect(request?.instance == validInstance)
@@ -137,7 +137,7 @@ final class InstanceTests: @unchecked Sendable {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: connected)
         let setup: ManualClientSetup = makeManualClient(endpoint: server.url, config: CentrifugeClientConfig(), delegate: delegate)
         setup.client.connect()
-        await fulfillment(of: [connected], within: 5)
+        await parityFulfillment(of: [connected], within: 5, sourceLocation: #_sourceLocation)
 
         #expect(connectRequest()?.instance == "")
         withExtendedLifetime(delegate) {}

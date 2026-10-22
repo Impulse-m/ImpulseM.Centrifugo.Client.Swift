@@ -74,9 +74,36 @@ public final class CentrifugeRpcCall: @unchecked Sendable {
 }
 
 
-/// Links a call handle to its tracked call. `call` is set and read on the client's queue only.
+public extension CentrifugeClient {
+    /**
+     Send RPC command with options. The returned handle cancels the call.
+     - parameter method: String
+     - parameter data: Data
+     - parameter options: Headers and the deadline of the call
+     - parameter completion: Completion block
+     */
+    @discardableResult
+    func rpc(
+        method: String,
+        data: Data,
+        options: CentrifugeRpcOptions,
+        completion: @escaping (Result<CentrifugeRpcResult, Error>)->()
+    ) -> CentrifugeRpcCall {
+        let slot: RpcCallSlot = RpcCallSlot(queue: self.syncQueue, tracker: self.rpcTracker)
+        self.syncQueue.async { [weak self] in
+            guard let strongSelf = self else { return }
+            strongSelf.rpcTracker.admit(method: method, data: data, options: options, completion: completion, slot: slot)
+        }
+        return CentrifugeRpcCall(slot: slot)
+    }
+}
+
+
+/// Links a call handle to its tracked call. `call` is set and read on the client's queue only. It is
+/// weak: the tracker keeps a call until it settles, so a settled call and its completion are released
+/// even while the handle is held.
 internal final class RpcCallSlot: @unchecked Sendable {
-    internal var call: TrackedRpc?
+    internal weak var call: TrackedRpc?
     private let queue: DispatchQueue
     private weak var tracker: RpcTracker?
 

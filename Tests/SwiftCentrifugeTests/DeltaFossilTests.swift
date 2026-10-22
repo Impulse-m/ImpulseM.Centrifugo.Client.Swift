@@ -14,7 +14,7 @@ import Testing
             guard let origin = loadData(from: "origin", at: casePath),
                   let target = loadData(from: "target", at: casePath),
                   let goodDelta = loadData(from: "delta", at: casePath) else {
-                Issue.record("Missing files in test case \(i)", sourceLocation: #_sourceLocation)
+                Issue.record("Missing files in test case \(i)")
                 continue
             }
 
@@ -22,7 +22,7 @@ import Testing
                 let calculatedTarget = try DeltaFossil.applyDelta(source: origin, delta: goodDelta)
                 #expect(calculatedTarget == target, "Fossil test case \(i) failed: Calculated target does not match expected target")
             } catch {
-                Issue.record("Fossil test case \(i) failed: Error applying delta: \(error)", sourceLocation: #_sourceLocation)
+                Issue.record("Fossil test case \(i) failed: Error applying delta: \(error)")
             }
         }
     }
@@ -31,7 +31,7 @@ import Testing
         let fileURL = path.appendingPathComponent(fileName)
 
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            Issue.record("Could not find file \(fileName) at \(fileURL.path)", sourceLocation: #_sourceLocation)
+            Issue.record("Could not find file \(fileName) at \(fileURL.path)")
             return nil
         }
         return try? Data(contentsOf: fileURL)
@@ -45,15 +45,8 @@ import Testing
 
     private func assertThrows(
         _ delta: String,
-        _ expected: DeltaFossil.DeltaError
-    ) {
-        assertThrows(delta, expected, sourceLocation: #_sourceLocation)
-    }
-
-    private func assertThrows(
-        _ delta: String,
         _ expected: DeltaFossil.DeltaError,
-        sourceLocation: SourceLocation
+        sourceLocation: SourceLocation = #_sourceLocation
     ) {
         do {
             _ = try DeltaFossil.applyDelta(source: malformedOrigin, delta: Data(delta.utf8))

@@ -22,6 +22,16 @@ internal let maxLaterResends: Int = 3
 /// Base of the later-resend delay in nanoseconds: 250 ms, doubled for each later resend so far.
 internal let laterResendBaseNanos: UInt64 = 250_000_000
 
+/// Client-local rpc error codes. They travel as `replyError` codes, as the contract documents, but
+/// the server never sends them. A call with headers on a connection without the RPC options.
+internal let rpcCodeUnsupported: UInt32 = 15
+
+/// A call refused by the client's bound on tracked calls, or a resend beyond its limit.
+internal let rpcCodeLimitExceeded: UInt32 = 16
+
+/// A call the client cancelled, before or after it was sent.
+internal let rpcCodeCancelled: UInt32 = 17
+
 
 /// The two resend signals of the server.
 internal enum RpcRetrySignal: Equatable {

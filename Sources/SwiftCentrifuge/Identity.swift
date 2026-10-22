@@ -1,6 +1,6 @@
 import Foundation
 
-// The identity of a connection (parity spec F5): the user and auth class that the server
+// The identity of a connection: the user and auth class that the server
 // confirmed in the connect reply and in each refresh reply. The client holds it on syncQueue
 // only, and reports it through `CentrifugeClientDelegate.onAuth`.
 

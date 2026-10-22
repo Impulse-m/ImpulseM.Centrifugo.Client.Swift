@@ -1,9 +1,8 @@
 import Foundation
 
-// The instance of a client: an id the server keeps apart per client (parity spec F3). It is
-// validated when the client is created, sent in the connect request when it is set, and shown
-// only as `instanceRedaction` in the debug log. It is never generated, persisted or put in an
-// error text.
+// The instance of a client: an id the server keeps apart per client. It is validated when the
+// client is created, sent in the connect request when it is set, and shown only as
+// `instanceRedaction` in the debug log. It is never generated, persisted or put in an error text.
 
 /// Shortest instance the server accepts, in characters. All allowed characters are ASCII.
 internal let instanceMinLength: Int = 22
@@ -34,19 +33,6 @@ internal func instanceConfigurationError(_ instance: String?) -> CentrifugeError
     return CentrifugeError.configurationError(
         message: "instance must be 22 to 64 characters of A-Z, a-z, 0-9, _ or -"
     )
-}
-
-
-/// The configuration error of a client, or nil when the client can work: the instance (see
-/// `instanceConfigurationError`), and `maxPendingRpc` at least 1.
-internal func clientConfigurationError(_ config: CentrifugeClientConfig) -> CentrifugeError? {
-    if let error: CentrifugeError = instanceConfigurationError(config.instance) {
-        return error
-    }
-    if config.maxPendingRpc < 1 {
-        return CentrifugeError.configurationError(message: "maxPendingRpc must be at least 1")
-    }
-    return nil
 }
 
 

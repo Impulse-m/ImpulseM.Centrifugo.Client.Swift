@@ -64,7 +64,7 @@ struct GetStateTests {
         let exp = Expectation("publish")
         client.publish(channel: channel, data: data) { result in
             if case .failure(let err) = result {
-                Issue.record("publish failed: \(err)", sourceLocation: #_sourceLocation)
+                Issue.record("publish failed: \(err)")
             }
             exp.fulfill()
         }

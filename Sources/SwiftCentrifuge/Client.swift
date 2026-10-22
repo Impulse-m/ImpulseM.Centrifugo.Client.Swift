@@ -28,8 +28,8 @@ public enum CentrifugeError: Error {
     case replyErrorDetails(CentrifugeReplyError)
     /// The connection was lost while the call was on it, and the call cannot be resent on the next one.
     case connectionClosed
-    /// The request of the call could not be encoded. The call was not sent. The transport gives no
-    /// write error signal, so this covers serialization failures only.
+    /// Reserved (code 10). No protobuf request can fail to encode, and the transport gives no write error
+    /// signal, so the client does not produce this case today. It stays for the shape of the API.
     case transportWriteError(error: Error)
     /// The client refused the call itself, with a text that is not a server reply. Reserved for the
     /// rpc pool, and never a server reply code.
@@ -566,28 +566,6 @@ public class CentrifugeClient: @unchecked Sendable {
     public func rpc(method: String, data: Data, completion: @escaping (Result<CentrifugeRpcResult, Error>)->()) {
         self.rpc(method: method, data: data, options: CentrifugeRpcOptions(), completion: completion)
     }
-
-    /**
-     Send RPC command with options. The returned handle cancels the call.
-     - parameter method: String
-     - parameter data: Data
-     - parameter options: Headers and the deadline of the call
-     - parameter completion: Completion block
-     */
-    @discardableResult
-    public func rpc(
-        method: String,
-        data: Data,
-        options: CentrifugeRpcOptions,
-        completion: @escaping (Result<CentrifugeRpcResult, Error>)->()
-    ) -> CentrifugeRpcCall {
-        let slot: RpcCallSlot = RpcCallSlot(queue: self.syncQueue, tracker: self.rpcTracker)
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.rpcTracker.admit(method: method, data: data, options: options, completion: completion, slot: slot)
-        }
-        return CentrifugeRpcCall(slot: slot)
-    }
     
     public func presence(channel: String, completion: @escaping (Result<CentrifugePresenceResult, Error>)->()) {
         self.syncQueue.async { [weak self] in
@@ -1007,6 +985,8 @@ fileprivate extension CentrifugeClient {
         
         if let result = res {
             self.state = .connected
+            // Queued calls go out here, before the delegate's onConnected. A call that this settles
+            // (headers on a connection without the RPC options) completes before that event.
             self.rpcTracker.onConnected(capable: (result.flag & ConnectFlags.rpcOptions) != 0)
             self.reconnectAttempts = 0
             self.client = result.client
@@ -1434,8 +1414,8 @@ fileprivate extension CentrifugeClient {
             self.state = .disconnected
         }
         let needEvent = previousState != self.state
-        self.rpcTracker.onTransportLost(terminal: !reconnect)
 
+        self.rpcTracker.onTransportLost(terminal: !reconnect)
         self.client = nil
 
         // Channel compaction IDs are scoped to a server session — drop the routing

@@ -9,6 +9,11 @@ import Foundation
 // The tracker runs on the client's queue only. Its one timer serves the earliest of the call
 // deadlines, the later-resend times and the expiries of the reply routes. The due moments are kept
 // in heaps and queues (RpcDeadlines.swift), so no event scans the calls or the routes.
+//
+// Replies are routed through the tracker's own table of routes, not through the client's opCallbacks.
+// A route holds the call, the msg_id and the expiry of a late reply, which an opCallbacks entry cannot
+// hold, and the table is cleared with the connection (onTransportLost). The client asks `owns` and
+// `awaitsReply` before it hands a reply over, so the two tables agree on which replies are the tracker's.
 
 /// The phase of one call.
 internal enum TrackedRpcPhase {
@@ -167,7 +172,7 @@ internal final class RpcTracker {
         let counted: Bool = client.config.instance != nil
         if counted {
             if self.inFlight >= client.config.maxPendingRpc {
-                completion(.failure(CentrifugeError.replyError(code: 16, message: "limit exceeded", temporary: false)))
+                completion(.failure(CentrifugeError.replyError(code: rpcCodeLimitExceeded, message: "limit exceeded", temporary: false)))
                 return
             }
             self.inFlight += 1
@@ -203,7 +208,7 @@ internal final class RpcTracker {
         guard let target: TrackedRpc = call else {
             return
         }
-        self.finishLocally(target, error: CentrifugeError.replyError(code: 17, message: "cancelled", temporary: false))
+        self.finishLocally(target, error: CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false))
         self.armTimer()
     }
 
@@ -334,7 +339,7 @@ internal final class RpcTracker {
                 return
             }
             if !self.capable && !call.headers.isEmpty {
-                self.settle(call, .failure(CentrifugeError.replyError(code: 15, message: "unsupported", temporary: false)))
+                self.settle(call, .failure(CentrifugeError.replyError(code: rpcCodeUnsupported, message: "unsupported", temporary: false)))
                 return
             }
         }
@@ -452,11 +457,15 @@ internal final class RpcTracker {
                 self.surfaceRefusal(call, error: error)
                 return
             }
-            // The delay is capped at the remaining deadline, so the resend is never due after it.
+            // The range of the draw is capped at the remaining deadline, not the drawn value, so the
+            // resend is never due after it. The draw is uniform over the capped range.
             let remaining: UInt64 = call.deadline - now
-            let factor: UInt64 = UInt64(1) << UInt64(call.laterResends)
-            let ceiling: UInt64 = min(laterResendBaseNanos * factor, remaining)
-            let delay: UInt64 = client.random.uniform(0 ... ceiling)
+            let delay: UInt64 = fullJitterNanos(
+                base: laterResendBaseNanos,
+                attempt: call.laterResends,
+                cap: remaining,
+                random: client.random
+            )
             call.laterResends += 1
             call.phase = .resendWait
             call.commandId = 0

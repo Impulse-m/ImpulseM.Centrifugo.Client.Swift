@@ -84,7 +84,7 @@ final class CallWaitTests: @unchecked Sendable {
         client.disconnect()
         await fulfillment(of: done, within: 3)
         if case CentrifugeError.clientDisconnected? = failure.get {} else {
-            Issue.record("expected clientDisconnected, got \(String(describing: failure.get))", sourceLocation: #_sourceLocation)
+            Issue.record("expected clientDisconnected, got \(String(describing: failure.get))")
         }
     }
 }

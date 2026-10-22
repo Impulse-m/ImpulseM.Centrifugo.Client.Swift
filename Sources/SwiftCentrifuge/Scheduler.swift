@@ -110,10 +110,12 @@ extension CentrifugeClient {
 }
 
 
-/// The earlier of an optional moment and a candidate; the candidate when there is none yet.
-internal func earlierNanos(_ current: UInt64?, _ candidate: UInt64) -> UInt64 {
-    guard let known: UInt64 = current else {
-        return candidate
-    }
-    return min(known, candidate)
+/// A full-jitter delay in nanoseconds: uniform over `0 ... min(cap, base * 2^attempt)`, drawn from the
+/// injected source. It is the shape of `getBackoffDelay` in nanoseconds, so every jittered delay of
+/// the client has one formula. The exponent is capped, so the product cannot overflow.
+internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: ClientRandom) -> UInt64 {
+    let shift: Int = max(0, min(attempt, 62))
+    let scaled: (partialValue: UInt64, overflow: Bool) = base.multipliedReportingOverflow(by: UInt64(1) << UInt64(shift))
+    let ceiling: UInt64 = scaled.overflow ? cap : min(scaled.partialValue, cap)
+    return random.uniform(0 ... ceiling)
 }
