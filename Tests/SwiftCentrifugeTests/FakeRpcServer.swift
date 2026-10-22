@@ -82,13 +82,15 @@ final class FakeRpcServer: @unchecked Sendable {
     }
 
 
-    /// Records a command, wakes the waiters it matches, and tells whether it gets no reply.
+    /// Tells whether a command gets no reply, then records it and wakes the waiters it matches. The drop
+    /// decision comes first: a waiter resumes only after the rule has run, so a test may change the rule
+    /// once `awaitArrivals` returns without racing the decision for the command that woke it.
     private func arrived(_ command: RpcCommand) -> Bool {
-        arrivals.record(command)
         lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return self.dropRule?(command) ?? false
+        let rule: ((RpcCommand) -> Bool)? = self.dropRule
+        lock.unlock()
+        let dropped: Bool = rule?(command) ?? false
+        arrivals.record(command)
+        return dropped
     }
 }
