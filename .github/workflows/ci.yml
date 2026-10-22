@@ -53,20 +53,18 @@ jobs:
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
+        env:
+          SWIFT_BACKTRACE: enable=yes,interactive=no,color=no
         run: ./scripts/test.sh --verbose
-      - name: Run each rpc test alone on failure
+      - name: Show crash reports on failure
         if: failure()
         run: |
-          swift test list 2>/dev/null | grep 'RpcTrackerTests' | sed -E 's/.*RpcTrackerTests[./]//; s/\(.*//' | sort -u > rpc_tests.txt
-          wc -l < rpc_tests.txt
-          while read -r t; do
-            code=0
-            swift test --skip-build --filter "RpcTrackerTests/$t" > one.log 2>&1 || code=$?
-            echo "[$code] $t"
-            if [ "$code" -ne 0 ]; then
-              grep -E "Fatal|fatal|error:|Expectation|✘" one.log | head -8
-            fi
-          done < rpc_tests.txt
+          cd ~/Library/Logs/DiagnosticReports 2>/dev/null || exit 0
+          for f in $(ls -t | grep -E '\.(ips|crash)$' | head -5); do
+            echo "==> $f"
+            head -c 400000 "$f"
+            echo
+          done
       - name: Show Centrifugo log on failure
         if: failure()
         run: cat centrifugo.log || true
