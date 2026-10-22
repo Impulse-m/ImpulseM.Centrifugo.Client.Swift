@@ -67,8 +67,11 @@ jobs:
           echo "=== b. per-file frontend typecheck"
           for f in Tests/SwiftCentrifugeTests/*.swift; do
             OTHERS=$(ls Tests/SwiftCentrifugeTests/*.swift | grep -v -F "$f")
-            xcrun swiftc -frontend -typecheck -primary-file "$f" $OTHERS $FLAGS -Xfrontend -warn-long-expression-type-checking=200 -Xfrontend -warn-long-function-bodies=200 2>&1 | tail -40
-            echo "$f exit ${PIPESTATUS[0]}"
+            /usr/bin/time -l xcrun swiftc -frontend -typecheck -primary-file "$f" $OTHERS $FLAGS -warn-long-expression-type-checking=200 -warn-long-function-bodies=200 > frontend.out 2>&1
+            RC=$?
+            tail -40 frontend.out
+            grep -E "maximum resident|real " frontend.out | head -3
+            echo "$f exit $RC"
           done
           echo "=== c. verbose build of tests, one job"
           swift build --build-tests -Xswiftc -target -Xswiftc arm64-apple-macos14.0 -Xswiftc -disable-batch-mode -j 1 -v 2>&1 | tail -60
