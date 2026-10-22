@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-/// The instance of a client (parity spec F3): its validation at `create`, what `init` does with
+/// The instance of a client: its validation at `create`, what `init` does with
 /// an invalid one, the connect request and the debug log. Driven by FakeCentrifugoServer.
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class InstanceTests: @unchecked Sendable {

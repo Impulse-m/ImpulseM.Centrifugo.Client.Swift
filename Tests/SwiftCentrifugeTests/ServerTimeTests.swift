@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-/// The server time of a client (parity spec F4): the offset that each command reply with a time
+/// The server time of a client: the offset that each command reply with a time
 /// sets, read through `serverTimeMillis()`. The clock is the test clock, so every value is exact.
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class ServerTimeTests: @unchecked Sendable {

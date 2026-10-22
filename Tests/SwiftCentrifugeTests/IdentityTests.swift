@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-/// The identity of a connection (parity spec F5): the `onAuth` event of each connect, and of each
+/// The identity of a connection: the `onAuth` event of each connect, and of each
 /// refresh that changes the user or the auth class. The refreshes are the timer refreshes, driven by
 /// the test clock, so no real time passes.
 @Suite(.serialized, .timeLimit(.minutes(1)))

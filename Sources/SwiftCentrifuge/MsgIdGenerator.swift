@@ -43,7 +43,7 @@ internal struct MsgIdGenerator {
 
     /// - Parameters:
     ///   - now: the corrected server time in milliseconds when the generator starts. The
-    ///     first id takes the time part of `now` (see the type comment, table T3).
+    ///     first id takes the time part of `now` (see the type comment).
     ///   - random: draws the lanes.
     internal init(now: Int64, random: ClientRandom) {
         self.random = random

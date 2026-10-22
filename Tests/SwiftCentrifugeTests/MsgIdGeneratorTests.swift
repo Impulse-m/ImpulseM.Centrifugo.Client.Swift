@@ -102,8 +102,8 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
 
 
     /// The first id takes the second of `now`, the start time, not the time of the first call.
-    /// A backward correction between the two keeps that second (table T3; JS and Java take the
-    /// second of the first call, the difference is recorded in the MsgIdGenerator type comment).
+    /// A backward correction between the two keeps that second (JS and Java take the second of the
+    /// first call; the difference is recorded in the MsgIdGenerator type comment).
     @Test func firstIdKeepsTheSecondOfTheStartTime() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
@@ -174,7 +174,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
     }
 
 
-    // The range [0, 2^19) holds 2^19 values, 19 bits; the name is the spec's canonical row name.
+    // The range [0, 2^19) holds 2^19 values, 19 bits.
     @Test func laneIsDrawnFromTheNineteenBitsRange() throws {
         let low: ManualRandom = ManualRandom(lanes: [lowerLane])
         var lowGenerator: MsgIdGenerator = MsgIdGenerator(now: 0, random: low)
