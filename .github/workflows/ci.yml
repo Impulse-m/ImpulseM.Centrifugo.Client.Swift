@@ -50,6 +50,33 @@ jobs:
           echo "Centrifugo did not start in time"
           cat centrifugo.log || true
           exit 1
+      # DIAGNOSTIC (temporary, revert before finishing): locate the test build failure.
+      - name: Diagnose test build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          MODDIR=$(dirname "$(find .build -name SwiftCentrifuge.swiftmodule -maxdepth 6 | head -1)")
+          echo "module dir: $MODDIR"
+          find .build -name '*.swiftmodule' -maxdepth 6 | head -20
+          FLAGS="-target arm64-apple-macos14.0 -I $MODDIR -F $(xcode-select -p)/Platforms/MacOSX.platform/Developer/Library/Frameworks"
+          echo "=== a. typecheck all test files"
+          xcrun swiftc -typecheck $FLAGS Tests/SwiftCentrifugeTests/*.swift 2>&1 | tail -150
+          echo "typecheck exit ${PIPESTATUS[0]}"
+          echo "=== b. per-file frontend typecheck"
+          for f in Tests/SwiftCentrifugeTests/*.swift; do
+            OTHERS=$(ls Tests/SwiftCentrifugeTests/*.swift | grep -v -F "$f")
+            xcrun swiftc -frontend -typecheck -primary-file "$f" $OTHERS $FLAGS 2>&1 | tail -40
+            echo "$f exit ${PIPESTATUS[0]}"
+          done
+          echo "=== c. verbose build of tests, one job"
+          swift build --build-tests -Xswiftc -target -Xswiftc arm64-apple-macos14.0 -Xswiftc -disable-batch-mode -j 1 -v 2>&1 | tail -60
+          echo "build exit ${PIPESTATUS[0]}"
+          echo "=== crash reports"
+          for f in $(ls -t ~/Library/Logs/DiagnosticReports/swift-frontend* 2>/dev/null | head -5); do
+            echo "--- $f"
+            head -n 120 "$f"
+          done
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
