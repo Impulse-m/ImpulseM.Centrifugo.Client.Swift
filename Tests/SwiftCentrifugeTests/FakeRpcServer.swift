@@ -1,7 +1,7 @@
 import Foundation
 @testable import SwiftCentrifuge
 
-// The server side of the tracked-call tests (parity spec F7 to F9, section 4.2). It composes the
+// The server side of the tracked-call tests. It composes the
 // public hooks of FakeCentrifugoServer and leaves that file untouched: `dropCommand` records every
 // command and decides which get no reply, and `onCommand` builds the reply of the rest. The reply id
 // is set to the command id here, so a test never has to. Arrivals are awaited through
@@ -127,104 +127,5 @@ final class FakeRpcServer: @unchecked Sendable {
             expectation.fulfill()
         }
         return drop
-    }
-}
-
-
-/// The client delegate of the tracked-call tests: counts the connects and the disconnects, and lets a
-/// test wait until a count is reached.
-final class RpcTestDelegate: CentrifugeClientDelegate, @unchecked Sendable {
-    private enum Event: Hashable {
-        case connected
-        case connecting
-    }
-
-
-    private struct Waiter {
-        let event: Event
-        let target: Int
-        let expectation: Expectation
-    }
-
-
-    private let lock: NSLock = NSLock()
-    private var counts: [Event: Int] = [:]
-    private var waiters: [Waiter] = []
-
-
-    func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
-        record(Event.connected)
-    }
-
-
-    func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {
-        record(Event.connecting)
-    }
-
-
-    /// Suspends until `times` connects have been reported.
-    func awaitConnected(times: Int) async {
-        await awaitEvent(Event.connected, times: times)
-    }
-
-
-    /// Suspends until `times` events of the connecting state have been reported. `connect()` reports
-    /// one of them too, so a test counts from `connectingEvents`.
-    func awaitConnecting(times: Int) async {
-        await awaitEvent(Event.connecting, times: times)
-    }
-
-
-    /// The events of the connecting state reported so far.
-    var connectingEvents: Int {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return self.counts[Event.connecting] ?? 0
-    }
-
-
-    private func record(_ event: Event) {
-        var ready: [Expectation] = []
-        lock.lock()
-        let total: Int = (self.counts[event] ?? 0) + 1
-        self.counts[event] = total
-        self.waiters = self.waiters.filter { (waiter: Waiter) -> Bool in
-            if waiter.event == event && total >= waiter.target {
-                ready.append(waiter.expectation)
-                return false
-            }
-            return true
-        }
-        lock.unlock()
-        for expectation: Expectation in ready {
-            expectation.fulfill()
-        }
-    }
-
-
-    private func awaitEvent(_ event: Event, times: Int) async {
-        let expectation: Expectation = Expectation("delegate event")
-        let satisfied: Bool = registerEventWaiter(event, times: times, expectation: expectation)
-        if satisfied {
-            return
-        }
-        await fulfillment(of: expectation, within: 5)
-    }
-
-
-    /// Adds a waiter unless the count is already reached, and tells whether it is. Synchronous for the
-    /// same reason as `FakeRpcServer.registerWaiter`.
-    private func registerEventWaiter(_ event: Event, times: Int, expectation: Expectation) -> Bool {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        if (self.counts[event] ?? 0) >= times {
-            return true
-        }
-        self.waiters.append(Waiter(event: event, target: times, expectation: expectation))
-        return false
     }
 }

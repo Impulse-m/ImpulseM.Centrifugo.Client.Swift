@@ -1,6 +1,6 @@
 import Foundation
 
-// The public types of a tracked rpc call (parity spec F7): the options, the handle that cancels the
+// The public types of a tracked rpc call: the options, the handle that cancels the
 // call, and the error payload of a server error that carries application fields. The call logic is
 // in RpcTracker.swift.
 
@@ -94,4 +94,22 @@ internal final class RpcCallSlot: @unchecked Sendable {
             self.tracker?.cancelCall(self.call)
         }
     }
+}
+
+
+/// The error of a server reply. A reply that carries an application code, type or metadata is
+/// `replyErrorDetails`; any other is `replyError`.
+internal func rpcErrorValue(_ error: Centrifugal_Centrifuge_Protocol_Error) -> CentrifugeError {
+    if error.appCode != 0 || !error.appType.isEmpty || !error.metadata.isEmpty {
+        let details: CentrifugeReplyError = CentrifugeReplyError(
+            code: error.code,
+            message: error.message,
+            temporary: error.temporary,
+            appCode: error.appCode,
+            appType: error.appType,
+            metadata: error.metadata
+        )
+        return CentrifugeError.replyErrorDetails(details)
+    }
+    return CentrifugeError.replyError(code: error.code, message: error.message, temporary: error.temporary)
 }

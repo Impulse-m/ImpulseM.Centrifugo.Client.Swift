@@ -1,6 +1,6 @@
 import Foundation
 
-// The retry signal of a tracked rpc call (parity spec F8, contract 2.1). The server sets a metadata
+// The retry signal of a tracked rpc call. The server sets a metadata
 // key on its own errors, so a backend cannot set it: a call whose error carries it was not
 // executed. `new_msg_id` asks for a resend with a new msg_id, `later` for a resend with the same one.
 

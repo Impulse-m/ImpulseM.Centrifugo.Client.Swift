@@ -108,3 +108,12 @@ extension CentrifugeClient {
         self.scheduler.schedule(after: delay, lateGrace: false, item)
     }
 }
+
+
+/// The earlier of an optional moment and a candidate; the candidate when there is none yet.
+internal func earlierNanos(_ current: UInt64?, _ candidate: UInt64) -> UInt64 {
+    guard let known: UInt64 = current else {
+        return candidate
+    }
+    return min(known, candidate)
+}

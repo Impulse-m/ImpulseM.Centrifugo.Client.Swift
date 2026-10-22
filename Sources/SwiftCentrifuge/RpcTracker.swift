@@ -1,14 +1,14 @@
 import Foundation
 
-// The rpc calls of a client (parity spec F7 to F9, contract sections 1 to 3 and 6). Every rpc call
-// goes through the tracker. A call of a client with an instance, written on a connection that
-// confirmed the RPC options (flag bit 32), is tracked: it carries a msg_id, its replies are acked,
-// a lost call is resent with `retransmit` on the next connection, it can be cancelled, and it counts
-// against `maxPendingRpc`. Any other call is plain: no msg_id, and a call on a lost connection fails.
+// The rpc calls of a client. Every rpc call goes through the tracker. A call of a client with an
+// instance, written on a connection that confirmed the RPC options (flag bit 32), is tracked: it
+// carries a msg_id, its replies are acked, a lost call is resent with `retransmit` on the next
+// connection, it can be cancelled, and it counts against `maxPendingRpc`. Any other call is plain: no
+// msg_id, and a call on a lost connection fails.
 //
 // The tracker runs on the client's queue only. Its one timer serves the earliest of the call
-// deadlines, the later-resend times and the expiries of the reply routes (parity spec F9): no timer
-// belongs to a single call.
+// deadlines, the later-resend times and the expiries of the reply routes. The due moments are kept
+// in heaps and queues (RpcDeadlines.swift), so no event scans the calls or the routes.
 
 /// The phase of one call.
 internal enum TrackedRpcPhase {
@@ -94,6 +94,10 @@ internal final class RpcTracker {
     private var lastSeq: Int = 0
     private var calls: [Int: TrackedRpc] = [:]
     private var routes: [UInt32: Route] = [:]
+    // The due moments of the calls (deadlines and later resends), and the route expiries in order.
+    // An entry is live only while its call and its state still match; see isLive and isCurrent.
+    private var dues: RpcDueHeap = RpcDueHeap()
+    private var expiries: RpcExpiryQueue = RpcExpiryQueue()
     private var pendingAcks: [UInt64] = []
     private var pendingCancels: [UInt64] = []
     private var inFlight: Int = 0
@@ -105,9 +109,9 @@ internal final class RpcTracker {
     }
 
 
-    /// The tracker is released with its client. Its pending deadline item is cancelled, so nothing
-    /// stays scheduled for a dead client. A running timer holds the tracker strongly, so the tracker
-    /// is never released in the middle of one.
+    /// The tracker is released with its client. Its pending timer item is cancelled, so nothing stays
+    /// scheduled for a dead client. The item's closure holds the tracker weakly, so a pending item
+    /// never keeps the tracker alive.
     deinit {
         self.timerItem?.cancel()
     }
@@ -182,6 +186,7 @@ internal final class RpcTracker {
         )
         slot.call = call
         self.calls[call.seq] = call
+        self.dues.push(RpcDue(nanos: deadline, seq: call.seq, resend: false))
         if self.connected {
             self.writeCall(call)
         }
@@ -235,6 +240,7 @@ internal final class RpcTracker {
         self.capable = false
         let lost: [Route] = Array(self.routes.values)
         self.routes.removeAll()
+        self.expiries = RpcExpiryQueue()
         let cancels: [UInt64] = lost.filter { (route: Route) -> Bool in
             return route.isCancel
         }.map { (route: Route) -> UInt64 in
@@ -376,7 +382,9 @@ internal final class RpcTracker {
         self.pendingAcks = []
         var expiry: UInt64? = nil
         if isCancel {
-            expiry = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
+            let dropAt: UInt64 = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
+            expiry = dropAt
+            self.expiries.push(RpcRouteExpiry(commandId: id, nanos: dropAt))
         }
         self.routes[id] = Route(call: call, msgID: msgID, isCancel: isCancel, expiry: expiry)
         return id
@@ -416,14 +424,21 @@ internal final class RpcTracker {
 
 
     /// Handles a refusal of a tracked call: a new msg_id at once, or a resend later with the same one.
+    /// Past the deadline, and once the resends of the signal are used up, the server error is surfaced
+    /// unchanged: no attempt could run inside the call, and the server did not run it.
     private func handleRetry(_ call: TrackedRpc, signal: RpcRetrySignal, error: Centrifugal_Centrifuge_Protocol_Error) {
         guard let client: CentrifugeClient = self.client else {
+            return
+        }
+        let now: UInt64 = client.clock.monotonicNanos()
+        guard call.deadline > now else {
+            self.surfaceRefusal(call, error: error)
             return
         }
         switch signal {
         case .newMsgID:
             guard call.newIdResends < maxNewIdResends else {
-                self.settle(call, .failure(rpcErrorValue(error)))
+                self.surfaceRefusal(call, error: error)
                 return
             }
             call.newIdResends += 1
@@ -434,15 +449,10 @@ internal final class RpcTracker {
             self.writeCall(call)
         case .later:
             guard call.laterResends < maxLaterResends else {
-                self.settle(call, .failure(rpcErrorValue(error)))
+                self.surfaceRefusal(call, error: error)
                 return
             }
-            let now: UInt64 = client.clock.monotonicNanos()
-            guard call.deadline > now else {
-                // The deadline is already reached: no attempt can run before it (F8).
-                self.settle(call, .failure(CentrifugeError.timeout))
-                return
-            }
+            // The delay is capped at the remaining deadline, so the resend is never due after it.
             let remaining: UInt64 = call.deadline - now
             let factor: UInt64 = UInt64(1) << UInt64(call.laterResends)
             let ceiling: UInt64 = min(laterResendBaseNanos * factor, remaining)
@@ -452,7 +462,18 @@ internal final class RpcTracker {
             call.commandId = 0
             call.resendAt = now + delay
             call.retransmit = true
+            self.dues.push(RpcDue(nanos: call.resendAt, seq: call.seq, resend: true))
         }
+    }
+
+
+    /// Settles a refused call with the server error, unchanged. The refusal is answered, so its msg_id is
+    /// acked, as for any other error reply.
+    private func surfaceRefusal(_ call: TrackedRpc, error: Centrifugal_Centrifuge_Protocol_Error) {
+        if call.msgID != 0 {
+            self.pendingAcks.append(call.msgID)
+        }
+        self.settle(call, .failure(rpcErrorValue(error)))
     }
 
 
@@ -489,9 +510,11 @@ internal final class RpcTracker {
         guard call.commandId != 0, var route: Route = self.routes[call.commandId] else {
             return
         }
+        let dropAt: UInt64 = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
         route.call = nil
-        route.expiry = client.clock.monotonicNanos() + clientNanos(client.config.timeout)
+        route.expiry = dropAt
         self.routes[call.commandId] = route
+        self.expiries.push(RpcRouteExpiry(commandId: call.commandId, nanos: dropAt))
     }
 
 
@@ -544,19 +567,46 @@ internal final class RpcTracker {
     }
 
 
+    /// Whether a due entry still stands: its call is waiting, and for a resend, still in the wait
+    /// that set the entry. A deadline entry stands while its call waits.
+    private func isLive(_ due: RpcDue) -> Bool {
+        guard let call: TrackedRpc = self.calls[due.seq] else {
+            return false
+        }
+        if !due.resend {
+            return true
+        }
+        return call.phase == .resendWait && call.resendAt == due.nanos
+    }
+
+
+    /// Whether a route expiry still stands: its route exists and has the same expiry.
+    private func isCurrent(_ expiry: RpcRouteExpiry) -> Bool {
+        return self.routes[expiry.commandId]?.expiry == expiry.nanos
+    }
+
+
+    /// Drops the entries at the front of both queues that no longer stand, so the fronts are the
+    /// earliest live moments.
+    private func dropStaleFronts() {
+        while let due: RpcDue = self.dues.earliest, !self.isLive(due) {
+            self.dues.pop()
+        }
+        while let expiry: RpcRouteExpiry = self.expiries.earliest, !self.isCurrent(expiry) {
+            self.expiries.pop()
+        }
+    }
+
+
     /// The earliest moment the timer must run, or nil when nothing needs it.
     private func nextWakeNanos() -> UInt64? {
+        self.dropStaleFronts()
         var earliest: UInt64? = nil
-        for call: TrackedRpc in self.calls.values {
-            earliest = earlierNanos(earliest, call.deadline)
-            if call.phase == .resendWait {
-                earliest = earlierNanos(earliest, call.resendAt)
-            }
+        if let due: RpcDue = self.dues.earliest {
+            earliest = due.nanos
         }
-        for route: Route in self.routes.values {
-            if let expiry: UInt64 = route.expiry {
-                earliest = earlierNanos(earliest, expiry)
-            }
+        if let expiry: RpcRouteExpiry = self.expiries.earliest {
+            earliest = earlierNanos(earliest, expiry.nanos)
         }
         return earliest
     }
@@ -588,8 +638,8 @@ internal final class RpcTracker {
     }
 
 
-    /// Runs what is due: the call deadlines, the later resends and the route expiries. A timer that
-    /// finds the client gone does nothing and does not re-arm.
+    /// Runs what is due: the call deadlines, the later resends and the route expiries, in time order.
+    /// A timer that finds the client gone does nothing and does not re-arm.
     private func onTimer() {
         self.timerItem = nil
         self.timerDue = nil
@@ -597,49 +647,24 @@ internal final class RpcTracker {
             return
         }
         let now: UInt64 = client.clock.monotonicNanos()
-        for call: TrackedRpc in self.sortedCalls() where call.phase != .settled {
+        while let due: RpcDue = self.dues.earliest, due.nanos <= now {
+            self.dues.pop()
+            guard let call: TrackedRpc = self.calls[due.seq], self.isLive(due) else {
+                continue
+            }
             if call.deadline <= now {
                 self.finishLocally(call, error: CentrifugeError.timeout)
-            } else if call.phase == .resendWait && call.resendAt <= now && self.connected {
+            } else if due.resend && self.connected {
                 call.phase = .queued
                 self.writeCall(call)
             }
         }
-        let expired: [UInt32] = self.routes.compactMap { (entry: (key: UInt32, value: Route)) -> UInt32? in
-            guard let expiry: UInt64 = entry.value.expiry, expiry <= now else {
-                return nil
+        while let expiry: RpcRouteExpiry = self.expiries.earliest, expiry.nanos <= now {
+            self.expiries.pop()
+            if self.isCurrent(expiry) {
+                self.routes.removeValue(forKey: expiry.commandId)
             }
-            return entry.key
-        }
-        for id: UInt32 in expired {
-            self.routes.removeValue(forKey: id)
         }
         self.armTimer()
     }
-}
-
-
-private func earlierNanos(_ current: UInt64?, _ candidate: UInt64) -> UInt64 {
-    guard let known: UInt64 = current else {
-        return candidate
-    }
-    return min(known, candidate)
-}
-
-
-/// The error of a server reply. A reply that carries an application code, type or metadata is
-/// `replyErrorDetails`; any other is `replyError`.
-internal func rpcErrorValue(_ error: Centrifugal_Centrifuge_Protocol_Error) -> CentrifugeError {
-    if error.appCode != 0 || !error.appType.isEmpty || !error.metadata.isEmpty {
-        let details: CentrifugeReplyError = CentrifugeReplyError(
-            code: error.code,
-            message: error.message,
-            temporary: error.temporary,
-            appCode: error.appCode,
-            appType: error.appType,
-            metadata: error.metadata
-        )
-        return CentrifugeError.replyErrorDetails(details)
-    }
-    return CentrifugeError.replyError(code: error.code, message: error.message, temporary: error.temporary)
 }

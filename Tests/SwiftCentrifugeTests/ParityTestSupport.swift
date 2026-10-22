@@ -4,6 +4,77 @@ import Foundation
 // Helpers of the tests of the parity features (instance, server time, identity). They are
 // built on the public delegate and logger protocols, and on the seams of ManualScheduler.swift.
 
+/// Counts the events of one kind and lets a test wait until a count is reached. Guarded by a lock, so
+/// the count can be read and waited on from any thread.
+final class EventCounter: @unchecked Sendable {
+    /// One waiter of `awaitCount`: fulfilled once the count reaches `target`.
+    private struct Waiter {
+        let target: Int
+        let expectation: Expectation
+    }
+
+
+    private let lock: NSLock = NSLock()
+    private var count: Int = 0
+    private var waiters: [Waiter] = []
+
+
+    /// The events counted so far.
+    var total: Int {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return self.count
+    }
+
+
+    /// Counts one event and fulfils the waiters that it reaches.
+    func record() {
+        var ready: [Expectation] = []
+        lock.lock()
+        self.count += 1
+        let reached: Int = self.count
+        self.waiters = self.waiters.filter { (waiter: Waiter) -> Bool in
+            if reached >= waiter.target {
+                ready.append(waiter.expectation)
+                return false
+            }
+            return true
+        }
+        lock.unlock()
+        for expectation: Expectation in ready {
+            expectation.fulfill()
+        }
+    }
+
+
+    /// Suspends until `times` events have been counted.
+    func awaitCount(times: Int) async {
+        let expectation: Expectation = Expectation("counted events")
+        if registerWaiter(target: times, expectation: expectation) {
+            return
+        }
+        await fulfillment(of: expectation, within: 5)
+    }
+
+
+    /// Adds a waiter unless the count is already reached, and tells whether it is. Synchronous, so the
+    /// lock is never taken from an async context.
+    private func registerWaiter(target: Int, expectation: Expectation) -> Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        if self.count >= target {
+            return true
+        }
+        self.waiters.append(Waiter(target: target, expectation: expectation))
+        return false
+    }
+}
+
+
 /// Records the events the parity tests check. The callbacks run on the client's queue; the lists
 /// are guarded so that the test thread can read them.
 final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendable {
@@ -11,6 +82,8 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
     let connected: Expectation
     private let authEvents: LockedBox<[CentrifugeAuthEvent]> = LockedBox([])
     private let errors: LockedBox<[Error]> = LockedBox([])
+    private let connectedCounter: EventCounter = EventCounter()
+    private let connectingCounter: EventCounter = EventCounter()
     /// Fulfilled by every `onMessage`, when one was given.
     private let messageArrived: Expectation?
 
@@ -18,6 +91,25 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
     init(connected: Expectation, messageArrived: Expectation? = nil) {
         self.connected = connected
         self.messageArrived = messageArrived
+    }
+
+
+    /// Suspends until `times` connects have been reported.
+    func awaitConnected(times: Int) async {
+        await connectedCounter.awaitCount(times: times)
+    }
+
+
+    /// Suspends until `times` connecting events have been reported. `connect()` reports one of them
+    /// too, so a test counts from `connectingEvents`.
+    func awaitConnecting(times: Int) async {
+        await connectingCounter.awaitCount(times: times)
+    }
+
+
+    /// The connecting events reported so far.
+    var connectingEvents: Int {
+        return connectingCounter.total
     }
 
 
@@ -42,7 +134,13 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
 
 
     func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
+        connectedCounter.record()
         connected.fulfill()
+    }
+
+
+    func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {
+        connectingCounter.record()
     }
 
 
@@ -75,12 +173,14 @@ struct ManualClientSetup {
 
 
 /// Builds a client on a ManualClock and a ManualScheduler. The client's own factory makes the
-/// scheduler, so it runs on the client's queue; the factory runs inside the initializer.
+/// scheduler, so it runs on the client's queue; the factory runs inside the initializer. `onFactory`
+/// receives the clock the factory was given, which is the clock of the client.
 func makeManualClient(
     endpoint: String,
     config: CentrifugeClientConfig,
     delegate: CentrifugeClientDelegate? = nil,
-    random: ClientRandom? = nil
+    random: ClientRandom? = nil,
+    onFactory: ((ClientClock) -> Void)? = nil
 ) -> ManualClientSetup {
     let clock: ManualClock = ManualClock()
     let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
@@ -89,8 +189,8 @@ func makeManualClient(
         config: config,
         delegate: delegate,
         clock: clock,
-        schedulerFactory: { (queue: DispatchQueue, _: ClientClock) -> ClientScheduler in
-            // The factory receives the same clock as the client; the local one avoids a cast.
+        schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
+            onFactory?(factoryClock)
             let manual: ManualScheduler = ManualScheduler(
                 queue: queue,
                 clock: clock

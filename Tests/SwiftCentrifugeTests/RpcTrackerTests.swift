@@ -2,10 +2,10 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-// The tracked rpc calls (parity spec F7 to F9, sections 4.3 "tracked", "cancel", "legacy", "bound"
-// and "retry"). The clock, the random source and the timers are the test seams: every timer runs
-// when a test advances the ManualScheduler, and no test sleeps. Each test first drains the client's
-// queue (`drain`), so a timer that the client arms on its queue is in place before the advance.
+// The tracked rpc calls: tracked and plain calls, cancels, the capability, the bound and the retry
+// signals. The clock, the random source and the timers are the test seams: every timer runs when a
+// test advances the ManualScheduler, and no test sleeps. Each test first drains the client's queue
+// (`drain`), so a timer that the client arms on its queue is in place before the advance.
 
 private let rpcTestInstance: String = "rpc-instance-0123456789abcdef"
 
@@ -33,7 +33,7 @@ private struct Harness {
     let client: CentrifugeClient
     let scheduler: ManualScheduler
     let clock: ManualClock
-    let delegate: RpcTestDelegate
+    let delegate: RecordingClientDelegate
 }
 
 
@@ -90,7 +90,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         random: ManualRandom = ManualRandom()
     ) async -> Harness {
         fake.server.connectResult = capabilityResult(capable)
-        let delegate: RpcTestDelegate = RpcTestDelegate()
+        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(
             endpoint: fake.server.url,
             config: config ?? instanceConfig(),
@@ -159,6 +159,15 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
+    /// The data of a successful call, or nil.
+    private func resultData(_ result: Result<CentrifugeRpcResult, Error>?) -> Data? {
+        guard case .success(let value)? = result else {
+            return nil
+        }
+        return value.data
+    }
+
+
     /// Drops the connection and returns once the client has reported the disconnect and run the
     /// rest of its disconnect path, so the reconnect it scheduled is in place.
     private func dropConnection(_ harness: Harness) async {
@@ -196,8 +205,23 @@ final class RpcTrackerTests: @unchecked Sendable {
     @Test func droppedCallRunsOnceAndTheResendGetsTheSameReply() async throws {
         let harness: Harness = await connectedHarness()
         let dropping: LockedBox<Bool> = LockedBox(true)
+        // The msg_ids of the calls the server ran: a dropped command is never run.
+        let executions: LockedBox<[UInt64]> = LockedBox([])
         fake.setDrop { (command: RpcCommand) -> Bool in
             return command.hasRpc && dropping.current
+        }
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasRpc, command.rpc.cancel == 0 else {
+                return nil
+            }
+            executions.update { (values: inout [UInt64]) in
+                values.append(command.rpc.msgID)
+            }
+            var result: Centrifugal_Centrifuge_Protocol_RPCResult = Centrifugal_Centrifuge_Protocol_RPCResult()
+            result.data = Data("once".utf8)
+            var reply: RpcReply = RpcReply()
+            reply.rpc = result
+            return reply
         }
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client)
         await fake.awaitArrivals("first call arrived") { (command: RpcCommand) -> Bool in
@@ -213,7 +237,8 @@ final class RpcTrackerTests: @unchecked Sendable {
         #expect(sent[0].rpc.msgID == sent[1].rpc.msgID, "the resend keeps the msg_id")
         #expect(sent[1].rpc.retransmit, "the resend is marked as a retransmit")
         #expect(sent[0].id != sent[1].id, "the resend takes a fresh command id")
-        #expect(succeeded(call.outcome.result))
+        #expect(executions.current == [sent[1].rpc.msgID], "the server ran the call once, on the resend")
+        #expect(resultData(call.outcome.result) == Data("once".utf8), "the resend gets the reply of that run")
     }
 
 
@@ -249,7 +274,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func aCallDroppedFromTheBatchBeforeItsWriteIsSentAsAFirstSend() async throws {
+    @Test func aCallAdmittedWhileDisconnectedIsSentAsAFirstSend() async throws {
         let harness: Harness = await connectedHarness()
         await dropConnection(harness)
         // The call is admitted while the client waits for its connection: it is not written yet.
@@ -322,6 +347,26 @@ final class RpcTrackerTests: @unchecked Sendable {
         }
         #expect(msgID != 0)
         #expect(cancelCommands().count == 1, "the deadline of a sent call sends one cancel")
+    }
+
+
+    /// Calls with one timeout share the tracker's timer: admitting more of them does not arm another.
+    @Test func theTimerIsNotArmedAgainForEachCall() async {
+        let harness: Harness = await connectedHarness(config: instanceConfig(timeout: 5))
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0
+        }
+        _ = startCall(harness.client)
+        await drain(harness)
+        let armedForFirst: Int = harness.scheduler.scheduledCalls.count
+        for _ in 0 ..< 9 {
+            _ = startCall(harness.client)
+        }
+        await drain(harness)
+        await fake.awaitArrivals("ten calls arrived", count: 10) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0
+        }
+        #expect(harness.scheduler.scheduledCalls.count == armedForFirst, "ten calls with one timeout arm the timer once")
     }
 
 
@@ -420,12 +465,12 @@ final class RpcTrackerTests: @unchecked Sendable {
     // MARK: bound
 
     /// A client whose connect is never answered, so every call waits for its connection.
-    private func waitingClient(config: CentrifugeClientConfig) async -> (client: CentrifugeClient, delegate: RpcTestDelegate) {
+    private func waitingClient(config: CentrifugeClientConfig) async -> (client: CentrifugeClient, delegate: RecordingClientDelegate) {
         fake.server.connectResult = capabilityResult(true)
         fake.setDrop { (command: RpcCommand) -> Bool in
             return command.hasConnect
         }
-        let delegate: RpcTestDelegate = RpcTestDelegate()
+        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(endpoint: fake.server.url, config: config, delegate: delegate)
         setup.client.connect()
         return (setup.client, delegate)
@@ -433,7 +478,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
 
     @Test func callsBeyondTheQueueBoundFailWithLimitExceeded() async {
-        let waiting: (client: CentrifugeClient, delegate: RpcTestDelegate) = await waitingClient(config: instanceConfig())
+        let waiting: (client: CentrifugeClient, delegate: RecordingClientDelegate) = await waitingClient(config: instanceConfig())
         var queued: [CallOutcome] = []
         for _ in 0 ..< 32 {
             queued.append(startCall(waiting.client).outcome)
@@ -454,7 +499,7 @@ final class RpcTrackerTests: @unchecked Sendable {
 
 
     @Test func aRefusedCallHoldsNoSlotOfTheBound() async throws {
-        let waiting: (client: CentrifugeClient, delegate: RpcTestDelegate) = await waitingClient(config: instanceConfig())
+        let waiting: (client: CentrifugeClient, delegate: RecordingClientDelegate) = await waitingClient(config: instanceConfig())
         var handles: [(call: CentrifugeRpcCall, outcome: CallOutcome)] = []
         for _ in 0 ..< 32 {
             handles.append(startCall(waiting.client))
@@ -473,14 +518,14 @@ final class RpcTrackerTests: @unchecked Sendable {
         } else {
             Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))", sourceLocation: #_sourceLocation)
         }
-        for handle in handles.dropFirst() {
+        for handle: (call: CentrifugeRpcCall, outcome: CallOutcome) in handles.dropFirst() {
             await fulfillment(of: handle.outcome.done, within: 5)
         }
     }
 
 
     @Test func withoutAnInstanceThereIsNoBound() async {
-        let waiting: (client: CentrifugeClient, delegate: RpcTestDelegate) = await waitingClient(config: instanceConfig(instance: nil))
+        let waiting: (client: CentrifugeClient, delegate: RecordingClientDelegate) = await waitingClient(config: instanceConfig(instance: nil))
         var outcomes: [CallOutcome] = []
         for _ in 0 ..< 40 {
             outcomes.append(startCall(waiting.client).outcome)
@@ -603,22 +648,118 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
-    @Test func laterResendDelayIsCappedAtTheRemainingDeadline() async {
+    /// The resend is capped at the remaining deadline (0.2 s, below the 250 ms ceiling), so it is due at the
+    /// deadline at the latest. The deadline settles the call first, so the resend that waited is never written.
+    /// The cap itself is not observable: a resend due at or after the deadline never runs, so the cap changes
+    /// no outcome.
+    @Test func aLaterResendDueAtTheDeadlineIsNeverWritten() async {
         let harness: Harness = await connectedHarness(random: ManualRandom(draw: 1))
         let metadata: [String: String] = [rpcRetryMetadataKey: rpcRetryValueLater]
-        refuseFirst(1) { () -> RpcReply in
-            return self.errorReply(code: 100, metadata: metadata)
+        // The server never answers the call itself: the test sends its refusal, so the refusal is handled
+        // at a known point, and the barrier call (answered, and after the refusal on the connection) shows
+        // that it was handled.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.method == "method"
         }
-        let armed: Expectation = Expectation("resend armed at the deadline")
-        harness.scheduler.observe { (scheduled: ScheduledCall) in
-            if abs(scheduled.delay - 0.2) < 0.000_001 {
-                armed.fulfill()
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasRpc, command.rpc.cancel == 0, command.rpc.method == "barrier" else {
+                return nil
             }
+            return self.successReply()
         }
         let options: CentrifugeRpcOptions = CentrifugeRpcOptions(timeout: 0.2)
-        _ = startCall(harness.client, options: options)
-        // The remaining deadline (0.2 s) is below 250 ms, so the resend waits for 0.2 s, not 0.25 s.
-        await fulfillment(of: armed, within: 5)
+        let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client, options: options)
+        await fake.awaitArrivals("rpc arrived") { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0 && command.rpc.method == "method"
+        }
+        let originalId: UInt32 = callCommands().first { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }?.id ?? 0
+        var refusal: RpcReply = errorReply(code: 100, metadata: metadata)
+        refusal.id = originalId
+        fake.server.sendReply(refusal)
+
+        let barrier: CallOutcome = CallOutcome()
+        harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
+            barrier.record(result)
+        }
+        await fulfillment(of: barrier.done, within: 5)
+
+        await harness.scheduler.advance(by: 0.25)
+        await fulfillment(of: call.outcome.done, within: 5)
+        if case CentrifugeError.timeout? = failure(call.outcome.result) {
+        } else {
+            Issue.record("expected timeout, got \(String(describing: call.outcome.result))", sourceLocation: #_sourceLocation)
+        }
+        let methodCommands: [RpcCommand] = callCommands().filter { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }
+        #expect(methodCommands.count == 1, "the resend due at the deadline is never written")
+    }
+
+
+    /// Refuses the call of a test after its deadline, with the given retry signal, before the timer runs.
+    /// Returns the outcome of the call and the rpc commands sent by then.
+    private func refuseAfterDeadline(signal: String) async -> (outcome: CallOutcome, sent: [RpcCommand]) {
+        let harness: Harness = await connectedHarness(config: instanceConfig(timeout: 1))
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.method == "method"
+        }
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasRpc, command.rpc.cancel == 0, command.rpc.method == "barrier" else {
+                return nil
+            }
+            return self.successReply()
+        }
+        let options: CentrifugeRpcOptions = CentrifugeRpcOptions(timeout: 0.2)
+        let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(harness.client, options: options)
+        await fake.awaitArrivals("rpc arrived") { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.cancel == 0 && command.rpc.method == "method"
+        }
+        let originalId: UInt32 = callCommands().first { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }?.id ?? 0
+        // The clock passes the deadline, but the timer does not run: the refusal is handled first.
+        harness.clock.advance(by: 0.3)
+        var refusal: RpcReply = errorReply(code: 107, metadata: [rpcRetryMetadataKey: signal])
+        refusal.id = originalId
+        fake.server.sendReply(refusal)
+
+        let barrier: CallOutcome = CallOutcome()
+        harness.client.rpc(method: "barrier", data: Data()) { (result: Result<CentrifugeRpcResult, Error>) in
+            barrier.record(result)
+        }
+        await fulfillment(of: barrier.done, within: 5)
+        await fulfillment(of: call.outcome.done, within: 5)
+        return (outcome: call.outcome, sent: callCommands())
+    }
+
+
+    @Test func aRefusalWithTheNewMsgIdSignalPastItsDeadlineSurfacesTheError() async {
+        let result: (outcome: CallOutcome, sent: [RpcCommand]) = await refuseAfterDeadline(signal: rpcRetryValueNewMsgID)
+        if case CentrifugeError.replyErrorDetails(let details)? = failure(result.outcome.result) {
+            #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueNewMsgID, "the server error arrives unchanged")
+        } else {
+            Issue.record("expected the server error, got \(String(describing: result.outcome.result))", sourceLocation: #_sourceLocation)
+        }
+        let methodCommands: [RpcCommand] = result.sent.filter { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }
+        #expect(methodCommands.count == 1, "a refusal past the deadline is not resent with a new msg_id")
+    }
+
+
+    @Test func aRefusalWithTheLaterSignalPastItsDeadlineSurfacesTheError() async {
+        let result: (outcome: CallOutcome, sent: [RpcCommand]) = await refuseAfterDeadline(signal: rpcRetryValueLater)
+        if case CentrifugeError.replyErrorDetails(let details)? = failure(result.outcome.result) {
+            #expect(details.metadata[rpcRetryMetadataKey] == rpcRetryValueLater, "the server error arrives unchanged")
+        } else {
+            Issue.record("expected the server error, got \(String(describing: result.outcome.result))", sourceLocation: #_sourceLocation)
+        }
+        let methodCommands: [RpcCommand] = result.sent.filter { (command: RpcCommand) -> Bool in
+            return command.rpc.method == "method"
+        }
+        #expect(methodCommands.count == 1, "a refusal past the deadline is not resent later")
     }
 
 
@@ -763,7 +904,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         fake.setDrop { (command: RpcCommand) -> Bool in
             return command.hasConnect
         }
-        let delegate: RpcTestDelegate = RpcTestDelegate()
+        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(endpoint: fake.server.url, config: instanceConfig(timeout: 1), delegate: delegate)
         setup.client.connect()
         let call: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(setup.client)

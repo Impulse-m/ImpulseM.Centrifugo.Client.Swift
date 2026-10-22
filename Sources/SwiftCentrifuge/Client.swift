@@ -340,23 +340,8 @@ public class CentrifugeClient: @unchecked Sendable {
         self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: self.clock)
         self.configError = clientConfigurationError(config)
 
-        var request = URLRequest(url: URL(string: self.url)!)
-        for (key, value) in self.config.headers {
-            request.addValue(value, forHTTPHeaderField: key)
-        }
-
-        self.request = request
-
-        if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), config.useNativeWebSocket {
-            log.info("Using NativeWebSocket")
-        } else {
-            // Either useNativeWebSocket is off, or the OS is too old for
-            // URLSessionWebSocketTask (iOS < 13.0 and equivalents).
-            log.info("Using StarscreamWebSocket")
-            if config.tlsChallengeHandler != nil {
-                log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
-            }
-        }
+        self.request = CentrifugeClient.makeRequest(endpoint: self.url, config: self.config)
+        CentrifugeClient.logTransportChoice(config: self.config, log: self.log)
         self.rpcTracker.bind(client: self)
     }
 
@@ -386,21 +371,8 @@ public class CentrifugeClient: @unchecked Sendable {
         self.random = random
         self.scheduler = schedulerFactory(self.syncQueue, clock)
         self.configError = clientConfigurationError(config)
-        var request = URLRequest(url: URL(string: endpoint)!)
-        for (key, value) in config.headers {
-            request.addValue(value, forHTTPHeaderField: key)
-        }
-        self.request = request
-        if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), config.useNativeWebSocket {
-            log.info("Using NativeWebSocket")
-        } else {
-            // Either useNativeWebSocket is off, or the OS is too old for
-            // URLSessionWebSocketTask (iOS < 13.0 and equivalents).
-            log.info("Using StarscreamWebSocket")
-            if config.tlsChallengeHandler != nil {
-                log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
-            }
-        }
+        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
+        CentrifugeClient.logTransportChoice(config: config, log: self.log)
         self.rpcTracker.bind(client: self)
     }
 
@@ -661,7 +633,7 @@ public class CentrifugeClient: @unchecked Sendable {
 }
 
 internal extension CentrifugeClient {
-    
+
     func refreshWithToken(token: String, transportId: UInt64) {
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
@@ -710,8 +682,7 @@ internal extension CentrifugeClient {
     /// reply by that id. Throws when the command cannot be encoded: nothing is written then.
     func writeTrackedCommand(_ command: inout Centrifugal_Centrifuge_Protocol_Command) throws -> UInt32 {
         command.id = self.nextCommandId()
-        let data: Data = try CentrifugeSerializer.serializeCommands(commands: [command])
-        self.conn?.write(data: data)
+        try self.sendCommandAsync(command: command)
         return command.id
     }
 

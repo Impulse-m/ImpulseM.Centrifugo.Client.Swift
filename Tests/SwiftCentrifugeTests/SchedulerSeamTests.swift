@@ -118,36 +118,24 @@ final class SchedulerSeamTests: @unchecked Sendable {
     /// timeout must go through the scheduler it returns. No token getter is set, so the
     /// connect attempt reaches the open timeout before `awaitSyncQueue` returns.
     @Test func timeoutsAreScheduledThroughTheInjectedScheduler() async {
-        let manualClock: ManualClock = ManualClock()
-        let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
         let receivedClock: LockedBox<ClientClock?> = LockedBox(nil)
         var config: CentrifugeClientConfig = CentrifugeClientConfig()
         config.timeout = 7
-        let client: CentrifugeClient = CentrifugeClient(
+        let setup: ManualClientSetup = makeManualClient(
             endpoint: server.url,
             config: config,
-            delegate: nil,
-            clock: manualClock,
-            schedulerFactory: { (queue: DispatchQueue, factoryClock: ClientClock) -> ClientScheduler in
+            onFactory: { (factoryClock: ClientClock) in
                 receivedClock.set(factoryClock)
-                let manual: ManualScheduler = ManualScheduler(
-                    queue: queue,
-                    clock: factoryClock as! ManualClock
-                )
-                holder.set(manual)
-                return manual
-            },
-            random: SystemClientRandom()
+            }
         )
-        client.connect()
-        await awaitSyncQueue(client)
+        setup.client.connect()
+        await awaitSyncQueue(setup.client)
         defer {
-            client.disconnect()
+            setup.client.disconnect()
         }
 
-        #expect(receivedClock.current as? ManualClock === manualClock, "the client passes its own clock to the factory")
-        let scheduler: ManualScheduler? = holder.current
-        #expect(scheduler != nil)
+        #expect(receivedClock.current as? ManualClock === setup.clock, "the client passes its own clock to the factory")
+        let scheduler: ManualScheduler? = setup.scheduler
         let openTimeout: ScheduledCall? = scheduler?.scheduledCalls.first { (call: ScheduledCall) -> Bool in
             call.delay == 7
         }
