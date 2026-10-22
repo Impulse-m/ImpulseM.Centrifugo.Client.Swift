@@ -23,6 +23,8 @@ The features implemented by this SDK can be found in [SDK feature matrix](https:
 
 This library is distributed through Swift Package Manager only. CocoaPods and Carthage are not supported.
 
+`SwiftCentrifuge.podspec` is kept from upstream only so the upstream file history stays mergeable. It is not used for any distribution, and its `version` follows upstream's numbering (0.11.0), not this fork's release line (1.x).
+
 ### Swift Package Manager
 
 In Xcode, use `File` -> `Add Package Dependencies...` and enter:
