@@ -50,28 +50,6 @@ jobs:
           echo "Centrifugo did not start in time"
           cat centrifugo.log || true
           exit 1
-      # DIAGNOSTIC (temporary, revert before finishing): run each suite alone to find the one that traps.
-      - name: Run each suite alone
-        continue-on-error: true
-        run: |
-          set +e
-          mkdir -p diag
-          : > diag/summary.txt
-          for suite in CallWaitTests CodesTests CommandIdCounterTests CompactionTests ConnectionRefreshTests ConnectionTokenTests DeltaFossilTests DeltaPublicationTests FilterTests ForkFieldsSerializerTests GetStateTests IdentityTests InstanceTests LateTimerTests MsgIdGeneratorTests NativeWebSocketTLSChallengeTests PushRoutingTests ReentrancyTests RemoveSubscriptionTests RpcTrackerTests SchedulerSeamTests SerializerTests ServerSubscriptionTests ServerTimeTests StateInvalidationTests StaticTokenTests SubscriptionAttemptTests SubscriptionRefreshTests TransportTests; do
-            ./scripts/test.sh --filter "$suite" > "diag/$suite.log" 2>&1
-            echo "$suite exit $?" >> diag/summary.txt
-          done
-          cat diag/summary.txt
-      - name: Show suites that trapped
-        if: always()
-        run: |
-          cat diag/summary.txt || true
-          for f in diag/*.log; do
-            if grep -q "Fatal error\|Unexpectedly\|error: fatalError" "$f"; then
-              echo "=== $f"
-              grep -n -B2 -A6 "Fatal error\|Unexpectedly\|error: fatalError" "$f" | cut -c1-400 | head -60
-            fi
-          done
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
