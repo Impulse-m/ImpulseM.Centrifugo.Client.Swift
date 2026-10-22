@@ -82,7 +82,11 @@ struct ForkFieldsSerializerTests {
         var reply: PReply = PReply()
         reply.id = 1
         reply.connect = result
-        let frame: Data = try BinaryDelimited.serialize(message: reply)
+        let stream: OutputStream = OutputStream.toMemory()
+        stream.open()
+        try BinaryDelimited.serialize(message: reply, to: stream)
+        stream.close()
+        let frame: Data = stream.property(forKey: .dataWrittenToMemoryStreamKey) as! Data
 
         let replies: [PReply] = try CentrifugeSerializer.deserializeCommands(data: frame)
 
