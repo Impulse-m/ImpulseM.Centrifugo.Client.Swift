@@ -17,8 +17,8 @@ internal struct RpcDue {
 
 /// A binary min-heap of due moments, earliest first. Ties come out in no fixed order.
 ///
-/// It is written here because the spec forbids a new package dependency (section 7); apple/swift-collections
-/// would otherwise provide it. No benchmark has been run, so this comment claims no speed gain over it.
+/// It is written here because the package takes no new dependency. No benchmark has been run, so this
+/// comment claims no speed gain over a library heap.
 internal struct RpcDueHeap {
     private var items: [RpcDue] = []
 

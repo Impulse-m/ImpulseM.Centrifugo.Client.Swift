@@ -7,6 +7,23 @@ import Foundation
 /// The metadata key of the retry signal.
 internal let rpcRetryMetadataKey: String = "x-centrifugo-retry"
 
+/// The error of a server reply to an rpc call. A reply that carries an application code, type or metadata is
+/// `replyErrorDetails`; any other is `replyError`.
+internal func rpcErrorValue(_ error: Centrifugal_Centrifuge_Protocol_Error) -> CentrifugeError {
+    if error.appCode != 0 || !error.appType.isEmpty || !error.metadata.isEmpty {
+        let details: CentrifugeReplyError = CentrifugeReplyError(
+            code: error.code,
+            message: error.message,
+            temporary: error.temporary,
+            appCode: error.appCode,
+            appType: error.appType,
+            metadata: error.metadata
+        )
+        return CentrifugeError.replyErrorDetails(details)
+    }
+    return CentrifugeError.replyError(code: error.code, message: error.message, temporary: error.temporary)
+}
+
 /// The value that asks for a resend with a new msg_id.
 internal let rpcRetryValueNewMsgID: String = "new_msg_id"
 

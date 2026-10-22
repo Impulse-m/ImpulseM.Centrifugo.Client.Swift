@@ -2,12 +2,12 @@
 
 ## About this fork
 
-This is the ImpulseM fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained for [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo). The public API matches upstream, so the upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
+This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained alongside the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) of the same organization. The public API matches upstream, so the upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
 
 Sibling SDKs from the same organization:
 
-- JavaScript: [ImpulseM.Centrifugo.Client.JS](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS) (npm `@impulsem/centrifuge`)
-- Android (Java): [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java)
+- JavaScript: [JS client repository](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS)
+- Android (Java): [Java client repository](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java)
 
 Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) server and [Centrifuge](https://github.com/centrifugal/centrifuge) library.
 
@@ -17,7 +17,7 @@ Check out [client SDK API specification](https://centrifugal.dev/docs/transports
 
 The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
-> **This SDK is compatible with [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo) and upstream [Centrifugo](https://github.com/centrifugal/centrifugo) v6.**
+> **This SDK is compatible with [the Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) and upstream [Centrifugo](https://github.com/centrifugal/centrifugo) v6.**
 
 ## Installation
 
@@ -78,7 +78,7 @@ A call made with `rpc(method:data:options:completion:)` is tracked when the clie
 - `CentrifugeRpcResult.cached` is true when the server answered from its record of an earlier call with the same msg_id.
 - A call on a connection without the RPC options is sent as a plain request. Its headers cannot be carried, so such a call fails with code 15.
 
-**Breaking change (Swift fork v2.0.0):** a server error that carries an application code, type or metadata arrives as `CentrifugeError.replyErrorDetails(CentrifugeReplyError)`, not as `.replyError`. An app that matches only `.replyError` misses those errors. Errors without them stay `.replyError`. `CentrifugeError` gains the cases `connectionClosed`, `transportWriteError`, `clientRejected` and `replyErrorDetails`, so a `switch` over `CentrifugeError` needs a `default` case. `CentrifugeRpcResult` gains `cached`, and `CentrifugeClientConfig` gains `maxPendingRpc`, both with defaults.
+**Breaking change (Swift fork v2.0.0):** a server error reply to an rpc call that carries an application code, type or metadata arrives as `CentrifugeError.replyErrorDetails(CentrifugeReplyError)`, not as `.replyError`. An app that matches only `.replyError` misses those errors. Errors without them stay `.replyError`, and server replies to connect, subscribe and refresh always stay `.replyError`. `CentrifugeError` gains the cases `connectionClosed`, `transportWriteError`, `clientRejected` and `replyErrorDetails`, so a `switch` over `CentrifugeError` needs a `default` case. `CentrifugeRpcResult` gains `cached`, and `CentrifugeClientConfig` gains `maxPendingRpc`, both with defaults.
 
 **Breaking change (Swift fork v2.0.0):** a plain rpc call (a client without an `instance`, or a connection without the RPC options) that was written when the connection was lost now fails with `CentrifugeError.connectionClosed`, not `clientDisconnected`. An app that retries an rpc on `clientDisconnected` after a network drop must retry on `connectionClosed` as well. This applies to every client, with or without an `instance`.
 

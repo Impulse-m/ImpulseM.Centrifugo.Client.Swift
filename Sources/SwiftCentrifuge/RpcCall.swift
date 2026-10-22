@@ -124,19 +124,3 @@ internal final class RpcCallSlot: @unchecked Sendable {
 }
 
 
-/// The error of a server reply. A reply that carries an application code, type or metadata is
-/// `replyErrorDetails`; any other is `replyError`.
-internal func rpcErrorValue(_ error: Centrifugal_Centrifuge_Protocol_Error) -> CentrifugeError {
-    if error.appCode != 0 || !error.appType.isEmpty || !error.metadata.isEmpty {
-        let details: CentrifugeReplyError = CentrifugeReplyError(
-            code: error.code,
-            message: error.message,
-            temporary: error.temporary,
-            appCode: error.appCode,
-            appType: error.appType,
-            metadata: error.metadata
-        )
-        return CentrifugeError.replyErrorDetails(details)
-    }
-    return CentrifugeError.replyError(code: error.code, message: error.message, temporary: error.temporary)
-}

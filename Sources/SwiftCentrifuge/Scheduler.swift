@@ -114,22 +114,13 @@ extension CentrifugeClient {
 }
 
 
-/// The one jittered delay of the client, in nanoseconds: `min(cap, minimum + uniform[0, span])`, with the
-/// draw taken from `random`. The full-jitter delays below use it with no minimum. Connection and
-/// subscription retries with a minimum, and `getBackoffDelay` (Client.swift, which keeps Double.random for
-/// its other callers), are the same shape. A sum that overflows is capped.
-internal func jitteredDelayNanos(minimum: UInt64, span: UInt64, cap: UInt64, random: ClientRandom) -> UInt64 {
-    let drawn: UInt64 = random.uniform(0 ... span)
-    let total: (partialValue: UInt64, overflow: Bool) = minimum.addingReportingOverflow(drawn)
-    return total.overflow ? cap : min(total.partialValue, cap)
-}
-
-
 /// A full-jitter delay in nanoseconds: uniform over `0 ... min(cap, base * 2^attempt)`, drawn from the
-/// injected source. The exponent is capped, so the product cannot overflow.
+/// injected source. The exponent is capped, so the product cannot overflow. The draw is never above
+/// `cap`, so no further clamp is needed. The backoff of getBackoffDelay (Client.swift) keeps Double.random
+/// for its other callers; the retry formulas of the refresh policy reuse this one when they land.
 internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: ClientRandom) -> UInt64 {
     let shift: Int = max(0, min(attempt, 62))
     let scaled: (partialValue: UInt64, overflow: Bool) = base.multipliedReportingOverflow(by: UInt64(1) << UInt64(shift))
     let ceiling: UInt64 = scaled.overflow ? cap : min(scaled.partialValue, cap)
-    return jitteredDelayNanos(minimum: 0, span: ceiling, cap: cap, random: random)
+    return random.uniform(0 ... ceiling)
 }

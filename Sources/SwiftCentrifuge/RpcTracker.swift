@@ -8,7 +8,9 @@ import Foundation
 //
 // The tracker runs on the client's queue only. Its one timer serves the earliest of the call
 // deadlines, the later-resend times and the expiries of the reply routes. The due moments are kept
-// in heaps and queues (RpcDeadlines.swift), so no event scans the calls or the routes.
+// in heaps and queues (RpcDeadlines.swift), so no timer event scans the calls or the routes. A
+// connection event (a loss or a connect) scans the calls and the routes once each, in
+// onTransportLost and onConnected.
 //
 // Replies are routed through the tracker's own table of routes, not through the client's opCallbacks.
 // A route holds the call, the msg_id and the expiry of a late reply, which an opCallbacks entry cannot
@@ -410,6 +412,8 @@ internal final class RpcTracker {
         do {
             _ = try self.transmit(client: client, request: request, call: nil, msgID: msgID, isCancel: true)
         } catch {
+            // The error is dropped on purpose: the cancel is kept, and the next capable connection sends
+            // it. A protobuf cancel request cannot fail to encode, so the kept cancel is the only outcome.
             self.addPendingCancel(msgID)
         }
     }

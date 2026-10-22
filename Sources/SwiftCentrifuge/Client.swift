@@ -24,7 +24,8 @@ public enum CentrifugeError: Error {
     case subscriptionGetStateError(error: Error)
     case subscriptionRefreshError(error: Error)
     case replyError(code: UInt32, message: String, temporary: Bool)
-    /// A server error reply that carries an application code, type or metadata (see `CentrifugeReplyError`).
+    /// A server error reply to an rpc call that carries an application code, type or metadata (see
+    /// `CentrifugeReplyError`). Other server replies (connect, subscribe, refresh) stay `replyError`.
     case replyErrorDetails(CentrifugeReplyError)
     /// The connection was lost while the call was on it, and the call cannot be resent on the next one.
     case connectionClosed
@@ -330,11 +331,14 @@ public class CentrifugeClient: @unchecked Sendable {
             self.data = config.data;
         }
         
-        let queueID = UUID().uuidString
-        self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
-        self.clock = SystemClientClock()
+        let clock: ClientClock = SystemClientClock()
+        let seams: (syncQueue: DispatchQueue, scheduler: ClientScheduler) = CentrifugeClient.makeQueueAndScheduler(clock: clock) { queue, queueClock in
+            return DispatchClientScheduler(queue: queue, clock: queueClock)
+        }
+        self.syncQueue = seams.syncQueue
+        self.clock = clock
         self.random = SystemClientRandom()
-        self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: self.clock)
+        self.scheduler = seams.scheduler
         self.configError = clientConfigurationError(config)
 
         self.request = CentrifugeClient.makeRequest(endpoint: self.url, config: self.config)
@@ -344,8 +348,8 @@ public class CentrifugeClient: @unchecked Sendable {
 
     /// Initialize client with the clock and scheduler seams (see Scheduler.swift). The public
     /// initializer above passes the production values; tests reach this one through
-    /// `@testable import`. The body repeats the public one, because both initializers are
-    /// designated: a subclass calls the public one with `super.init`.
+    /// `@testable import`. Both are designated (a subclass calls the public one with `super.init`),
+    /// so the shared setup lives in `makeQueueAndScheduler`, not in a convenience initializer.
     internal init(
         endpoint: String,
         config: CentrifugeClientConfig,
@@ -362,15 +366,23 @@ public class CentrifugeClient: @unchecked Sendable {
         if config.data != nil {
             self.data = config.data
         }
-        let queueID = UUID().uuidString
-        self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+        let seams: (syncQueue: DispatchQueue, scheduler: ClientScheduler) = CentrifugeClient.makeQueueAndScheduler(clock: clock, schedulerFactory: schedulerFactory)
+        self.syncQueue = seams.syncQueue
         self.clock = clock
         self.random = random
-        self.scheduler = schedulerFactory(self.syncQueue, clock)
+        self.scheduler = seams.scheduler
         self.configError = clientConfigurationError(config)
         self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
         CentrifugeClient.logTransportChoice(config: config, log: self.log)
         self.rpcTracker.bind(client: self)
+    }
+
+    /// The client's queue and scheduler, made the same way by both initializers.
+    private static func makeQueueAndScheduler(clock: ClientClock, schedulerFactory: ClientSchedulerFactory) -> (syncQueue: DispatchQueue, scheduler: ClientScheduler) {
+        let queueID: String = UUID().uuidString
+        let syncQueue: DispatchQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+        let scheduler: ClientScheduler = schedulerFactory(syncQueue, clock)
+        return (syncQueue: syncQueue, scheduler: scheduler)
     }
     
     /**
@@ -653,17 +665,6 @@ internal extension CentrifugeClient {
         self.scheduler.schedule(after: delay, lateGrace: true, item)
     }
 
-    /// Gives a command the next command id and writes it on the connection. The tracker routes the
-    /// reply by that id. Throws when the command cannot be encoded: nothing is written then.
-    /// It stays in this file on purpose: it calls `nextCommandId` and `sendCommandAsync`, which are
-    /// private to Client.swift, and the command counter they use is fileprivate. Moving the helper
-    /// to Client+TrackedRpc.swift would mean widening all three.
-    func writeTrackedCommand(_ command: inout Centrifugal_Centrifuge_Protocol_Command) throws -> UInt32 {
-        command.id = self.nextCommandId()
-        try self.sendCommandAsync(command: command)
-        return command.id
-    }
-
     /// Whether the client is still connected over the transport with this id.
     func isCurrentConnection(_ transportId: UInt64) -> Bool {
         return self.transportId == transportId && self.state == .connected
@@ -797,6 +798,21 @@ internal extension CentrifugeClient {
         if newId > 0 {
             self.subscriptionsById[newId] = sub
         }
+    }
+
+    /// The next command id. The counter is shared by every command of the client, under its lock.
+    func nextCommandId() -> UInt32 {
+        self.commandIdLock.lock()
+        let cid = self.commandIds.next()
+        self.commandIdLock.unlock()
+        return cid
+    }
+
+    /// Writes one command without waiting for its reply. Throws when the command cannot be encoded.
+    func sendCommandAsync(command: Centrifugal_Centrifuge_Protocol_Command) throws {
+        let commands: [Centrifugal_Centrifuge_Protocol_Command] = [command]
+        let data = try CentrifugeSerializer.serializeCommands(commands: commands)
+        self.conn?.write(data: data)
     }
 }
 
@@ -1047,12 +1063,6 @@ fileprivate extension CentrifugeClient {
         handleData(data: data)
     }
     
-    private func nextCommandId() -> UInt32 {
-        self.commandIdLock.lock()
-        let cid = self.commandIds.next()
-        self.commandIdLock.unlock()
-        return cid
-    }
     
     private func sendCommand(command: Centrifugal_Centrifuge_Protocol_Command, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
         let strongSelf = self
@@ -1067,11 +1077,6 @@ fileprivate extension CentrifugeClient {
         }
     }
     
-    private func sendCommandAsync(command: Centrifugal_Centrifuge_Protocol_Command) throws {
-        let commands: [Centrifugal_Centrifuge_Protocol_Command] = [command]
-        let data = try CentrifugeSerializer.serializeCommands(commands: commands)
-        self.conn?.write(data: data)
-    }
     
     private func waitForReply(id: UInt32, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
         let timeoutTask = DispatchWorkItem { [weak self] in

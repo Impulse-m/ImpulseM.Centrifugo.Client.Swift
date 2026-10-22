@@ -1,7 +1,7 @@
 import Foundation
 
-// The setup that both client initializers share (see Client.swift): the request of the endpoint, the
-// log line of the transport choice, and the check of the configuration.
+// The setup that both client initializers share (see Client.swift): the request of the endpoint and the
+// log line of the transport choice. The check of the configuration is in Instance.swift.
 
 internal extension CentrifugeClient {
     /// The request of the endpoint, with the configured headers.

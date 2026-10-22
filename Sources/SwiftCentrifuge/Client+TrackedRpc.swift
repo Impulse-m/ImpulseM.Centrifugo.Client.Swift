@@ -16,4 +16,12 @@ internal extension CentrifugeClient {
         }
         self.rpcTracker.handleReply(reply)
     }
+
+    /// Gives a command the next command id and writes it on the connection. The tracker routes the
+    /// reply by that id. Throws when the command cannot be encoded: nothing is written then.
+    func writeTrackedCommand(_ command: inout Centrifugal_Centrifuge_Protocol_Command) throws -> UInt32 {
+        command.id = self.nextCommandId()
+        try self.sendCommandAsync(command: command)
+        return command.id
+    }
 }

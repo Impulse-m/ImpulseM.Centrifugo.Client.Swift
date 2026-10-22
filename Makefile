@@ -1,4 +1,4 @@
-.PHONY: all proto proto-check-tools test run-console-example
+.PHONY: all proto proto-check-tools test release run-console-example
 
 # The generator and Protocol pins (protoc version, swift-protobuf tag and commit,
 # the Protocol commit client.proto is copied from) live in tools.env, which the
@@ -20,6 +20,9 @@ proto: proto-check-tools
 # Command Line Tools, the script just wires up its search paths. See CLAUDE.md.
 test:
 	./scripts/test.sh
+
+release:
+	pod trunk push SwiftCentrifuge.podspec
 
 run-console-example:
 	cd Examples/ConsoleExample && swift run

@@ -114,6 +114,16 @@ final class RpcTrackerTests: @unchecked Sendable {
     }
 
 
+    /// Returns once the client's queue has run every block submitted before this call.
+    private func drainQueue(_ client: CentrifugeClient) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            client.syncQueue.async {
+                continuation.resume()
+            }
+        }
+    }
+
+
     private func startCall(
         _ client: CentrifugeClient,
         options: CentrifugeRpcOptions = CentrifugeRpcOptions()
@@ -527,7 +537,9 @@ final class RpcTrackerTests: @unchecked Sendable {
             queued.append(startCall(waiting.client).outcome)
         }
         let refused: (call: CentrifugeRpcCall, outcome: CallOutcome) = startCall(waiting.client)
-        await fulfillment(of: refused.outcome.done, within: 5)
+        // The refusal is decided on the client's queue at admission, so it is already set once the
+        // queue has run the block that follows the call. No connection is needed for it.
+        await drainQueue(waiting.client)
         if case CentrifugeError.replyError(let code, _, _)? = failure(refused.outcome.result) {
             #expect(code == 16)
         } else {
@@ -768,6 +780,14 @@ final class RpcTrackerTests: @unchecked Sendable {
         let originalId: UInt32 = callCommands().first { (command: RpcCommand) -> Bool in
             return command.rpc.method == "method"
         }?.id ?? 0
+        // The timers armed from here on: the refusal arms the resend, and the barrier, which is
+        // answered after the refusal on the same connection, has been handled by then.
+        let armedDelays: LockedBox<[TimeInterval]> = LockedBox([])
+        harness.scheduler.observe { (scheduled: ScheduledCall) in
+            armedDelays.update { (delays: inout [TimeInterval]) in
+                delays.append(scheduled.delay)
+            }
+        }
         var refusal: RpcReply = errorReply(code: 100, metadata: metadata)
         refusal.id = originalId
         fake.server.sendReply(refusal)
@@ -780,6 +800,11 @@ final class RpcTrackerTests: @unchecked Sendable {
 
         let expectedRange: ClosedRange<UInt64> = 0 ... 200_000_000
         #expect(random.requestedRanges.last == expectedRange, "the later resend is drawn over the remaining 200 ms, not 250 ms")
+        let delays: [TimeInterval] = armedDelays.current
+        let armedAtTheRemainingDeadline: Bool = delays.contains(where: { (delay: TimeInterval) -> Bool in
+            return abs(delay - 0.2) < 0.000_001
+        })
+        #expect(armedAtTheRemainingDeadline, "the resend is armed at the remaining deadline, 0.2 s")
 
         await harness.scheduler.advance(by: 0.2)
         await fulfillment(of: call.outcome.done, within: 5)

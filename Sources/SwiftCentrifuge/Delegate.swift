@@ -18,6 +18,18 @@ public struct CentrifugeConnectedEvent{
     }
 }
 
+/// The identity the server confirmed for the connection: on every connect, and on a refresh
+/// that changed it. Reported through `CentrifugeClientDelegate.onAuth`.
+public struct CentrifugeAuthEvent {
+    public let user: String
+    public let authClass: String
+
+    public init(user: String, authClass: String) {
+        self.user = user
+        self.authClass = authClass
+    }
+}
+
 public struct CentrifugeDisconnectedEvent{
     public let code: UInt32
     public let reason: String

@@ -1,6 +1,6 @@
 # Protocol sync
 
-`client.proto` is a copy of `definitions/client.proto` from `ImpulseM.Centrifugo.Protocol`.
+`client.proto` is a copy of `definitions/client.proto` from the Protocol repository of the fork.
 Never edit it here. The copy is LF-normalised; the source is CRLF, and the two match once
 carriage returns are ignored.
 
