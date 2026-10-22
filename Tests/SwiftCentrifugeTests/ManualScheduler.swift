@@ -7,6 +7,38 @@ import Foundation
 // moves the clock by the same delta. The test body calls `advance(by:)`; a delegate
 // callback never does. Nothing here calls `syncQueue.sync`.
 
+/// A value that a test double shares between threads, guarded by a lock.
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock: NSLock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    var current: T {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return value
+    }
+
+    func set(_ newValue: T) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func update(_ body: (inout T) -> Void) {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        body(&value)
+    }
+}
+
 /// A clock the test moves by hand.
 final class ManualClock: ClientClock, @unchecked Sendable {
     private let lock: NSLock = NSLock()
@@ -36,20 +68,27 @@ final class ManualClock: ClientClock, @unchecked Sendable {
     }
 }
 
-/// A random source whose draw the test sets. Draw 0 gives the lower bound of a range,
-/// draw 1 the upper bound.
+/// A random source the test controls. A Double draw of 0 gives the lower bound of a
+/// range, 1 the upper bound. Integer draws take the scripted values first, in order,
+/// then the Double draw. Every integer range asked for is recorded.
 final class ManualRandom: ClientRandom, @unchecked Sendable {
     private let lock: NSLock = NSLock()
     private var draw: Double
+    private var lanes: [UInt64]
+    private var integerRanges: [ClosedRange<UInt64>] = []
 
-    init(draw: Double) {
+    init(draw: Double = 0, lanes: [UInt64] = []) {
         self.draw = draw
+        self.lanes = lanes
     }
 
-    func setDraw(_ value: Double) {
+    /// The integer ranges asked for so far, in order.
+    var requestedRanges: [ClosedRange<UInt64>] {
         lock.lock()
-        draw = value
-        lock.unlock()
+        defer {
+            lock.unlock()
+        }
+        return integerRanges
     }
 
     func uniform(_ range: ClosedRange<Double>) -> Double {
@@ -59,18 +98,32 @@ final class ManualRandom: ClientRandom, @unchecked Sendable {
         return range.lowerBound + (range.upperBound - range.lowerBound) * current
     }
 
-    /// The same draw for an integer range, as the msg_id random source of MsgIdGenerator.
-    func uint64(_ range: ClosedRange<UInt64>) -> UInt64 {
+    func uniform(_ range: ClosedRange<UInt64>) -> UInt64 {
         lock.lock()
-        let current: Double = draw
-        lock.unlock()
+        defer {
+            lock.unlock()
+        }
+        integerRanges.append(range)
+        if !lanes.isEmpty {
+            return lanes.removeFirst()
+        }
         let span: Double = Double(range.upperBound - range.lowerBound)
-        return range.lowerBound + UInt64(span * current)
+        return range.lowerBound + UInt64(span * draw)
     }
 }
 
-/// Holds work items until the test advances the clock past their due time.
+/// Holds work items until the test advances the clock past their due time. The late-timer
+/// grace of DispatchClientScheduler does not apply here: an item runs when it is due.
 final class ManualScheduler: ClientScheduler, @unchecked Sendable {
+    /// The delay of every item scheduled so far, in order.
+    var scheduledDelays: [TimeInterval] {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return delays
+    }
+
     private struct Pending {
         let due: UInt64
         let item: DispatchWorkItem
@@ -88,16 +141,7 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
         self.clock = clock
     }
 
-    /// The delay of every item scheduled so far, in order.
-    var scheduledDelays: [TimeInterval] {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return delays
-    }
-
-    func schedule(after delay: TimeInterval, _ item: DispatchWorkItem) {
+    func schedule(after delay: TimeInterval, lateGrace: Bool, _ item: DispatchWorkItem) {
         lock.lock()
         let due: UInt64 = clock.monotonicNanos() + clientNanos(delay)
         pending.append(Pending(due: due, item: item))
@@ -119,7 +163,7 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
     }
 
     private func runDueItems() {
-        while let item = takeNextDue() {
+        while let item: DispatchWorkItem = takeNextDue() {
             item.perform()
         }
     }
@@ -131,7 +175,7 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
             lock.unlock()
         }
         let now: UInt64 = clock.monotonicNanos()
-        while let index = earliestDueIndex(now: now) {
+        while let index: Int = earliestDueIndex(now: now) {
             let entry: Pending = pending.remove(at: index)
             if !entry.item.isCancelled {
                 return entry.item
@@ -142,8 +186,8 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
 
     private func earliestDueIndex(now: UInt64) -> Int? {
         var best: Int? = nil
-        for index in pending.indices where pending[index].due <= now {
-            guard let current = best else {
+        for index: Int in pending.indices where pending[index].due <= now {
+            guard let current: Int = best else {
                 best = index
                 continue
             }

@@ -294,9 +294,7 @@ public class CentrifugeClient: @unchecked Sendable {
             delegate: delegate,
             clock: SystemClientClock(),
             random: SystemClientRandom(),
-            schedulerFactory: { (queue: DispatchQueue, clock: ClientClock) -> ClientScheduler in
-                return DispatchClientScheduler(queue: queue, clock: clock)
-            }
+            schedulerFactory: productionSchedulerFactory
         )
     }
 
@@ -635,7 +633,7 @@ internal extension CentrifugeClient {
     /// meanwhile may still be waiting in the socket, so the item runs after a short
     /// grace period instead, letting them be handled first.
     func scheduleTimeout(after delay: TimeInterval, _ item: DispatchWorkItem) {
-        self.scheduler.schedule(after: delay, item)
+        self.scheduler.schedule(after: delay, lateGrace: true, item)
     }
 
     /// Whether the client is still connected over the transport with this id.

@@ -8,41 +8,16 @@ final class SchedulerSeamTests: @unchecked Sendable {
 
     /// Records the names of the work items that ran, in order.
     private final class Recorder: @unchecked Sendable {
-        private let lock: NSLock = NSLock()
-        private var names: [String] = []
+        private let names: LockedBox<[String]> = LockedBox([])
 
         func add(_ name: String) {
-            lock.lock()
-            names.append(name)
-            lock.unlock()
+            names.update { (values: inout [String]) in
+                values.append(name)
+            }
         }
 
         var all: [String] {
-            lock.lock()
-            defer {
-                lock.unlock()
-            }
-            return names
-        }
-    }
-
-    /// Keeps the scheduler that the client factory builds, for the test to inspect.
-    private final class SchedulerHolder: @unchecked Sendable {
-        private let lock: NSLock = NSLock()
-        private var value: ManualScheduler? = nil
-
-        func set(_ scheduler: ManualScheduler) {
-            lock.lock()
-            value = scheduler
-            lock.unlock()
-        }
-
-        var get: ManualScheduler? {
-            lock.lock()
-            defer {
-                lock.unlock()
-            }
-            return value
+            return names.current
         }
     }
 
@@ -71,8 +46,8 @@ final class SchedulerSeamTests: @unchecked Sendable {
         let clock: ManualClock = ManualClock()
         let scheduler: ManualScheduler = ManualScheduler(queue: queue, clock: clock)
         let recorder: Recorder = Recorder()
-        scheduler.schedule(after: 1, DispatchWorkItem { recorder.add("first") })
-        scheduler.schedule(after: 5, DispatchWorkItem { recorder.add("second") })
+        scheduler.schedule(after: 1, lateGrace: false, DispatchWorkItem { recorder.add("first") })
+        scheduler.schedule(after: 5, lateGrace: false, DispatchWorkItem { recorder.add("second") })
 
         await scheduler.advance(by: 2)
         #expect(recorder.all == ["first"])
@@ -90,7 +65,7 @@ final class SchedulerSeamTests: @unchecked Sendable {
         let scheduler: ManualScheduler = ManualScheduler(queue: queue, clock: clock)
         let recorder: Recorder = Recorder()
         let item: DispatchWorkItem = DispatchWorkItem { recorder.add("cancelled") }
-        scheduler.schedule(after: 1, item)
+        scheduler.schedule(after: 1, lateGrace: false, item)
         item.cancel()
 
         await scheduler.advance(by: 2)
@@ -106,10 +81,10 @@ final class SchedulerSeamTests: @unchecked Sendable {
         let distant: DispatchWorkItem = DispatchWorkItem { recorder.add("distant") }
         let first: DispatchWorkItem = DispatchWorkItem {
             recorder.add("first")
-            scheduler.schedule(after: 0, later)
-            scheduler.schedule(after: 10, distant)
+            scheduler.schedule(after: 0, lateGrace: false, later)
+            scheduler.schedule(after: 10, lateGrace: false, distant)
         }
-        scheduler.schedule(after: 0, first)
+        scheduler.schedule(after: 0, lateGrace: false, first)
 
         await scheduler.advance(by: 0)
         #expect(recorder.all == ["first", "later"])
@@ -117,7 +92,7 @@ final class SchedulerSeamTests: @unchecked Sendable {
 
     @Test func timeoutsAreScheduledThroughTheInjectedScheduler() async {
         let manualClock: ManualClock = ManualClock()
-        let holder: SchedulerHolder = SchedulerHolder()
+        let holder: LockedBox<ManualScheduler?> = LockedBox(nil)
         var config: CentrifugeClientConfig = CentrifugeClientConfig()
         config.timeout = 7
         let client: CentrifugeClient = CentrifugeClient(
@@ -138,8 +113,15 @@ final class SchedulerSeamTests: @unchecked Sendable {
             client.disconnect()
         }
 
-        let scheduler: ManualScheduler? = holder.get
+        let scheduler: ManualScheduler? = holder.current
         #expect(scheduler != nil)
         #expect(scheduler?.scheduledDelays.contains(7) == true, "the open timeout goes through the injected scheduler")
+    }
+
+    @Test func clientNanosTreatsNonPositiveAndNaNDelaysAsZero() {
+        #expect(clientNanos(-1) == 0)
+        #expect(clientNanos(Double.nan) == 0)
+        #expect(clientNanos(0.5) == 500_000_000)
+        #expect(clientNanos(Double.infinity) == 9_000_000_000_000_000_000, "the delay is capped at 9e9 seconds")
     }
 }

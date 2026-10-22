@@ -11,10 +11,12 @@ internal struct CommandIdCounter {
         self.last = 0
     }
 
+
     /// Starts the counter at `last`, so the next id is `last + 1` (wrapping, skipping 0).
     internal init(last: UInt32) {
         self.last = last
     }
+
 
     internal mutating func next() -> UInt32 {
         self.last = self.last &+ 1

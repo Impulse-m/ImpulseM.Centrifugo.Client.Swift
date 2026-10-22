@@ -1,9 +1,10 @@
 import Foundation
 
 // The clock, random and scheduler seams of the client. Library code reads time and
-// randomness only through these protocols, so tests drive them by hand (see
+// randomness through these protocols, so tests drive them by hand (see
 // ManualScheduler.swift in the test target). The System and Dispatch types below
-// are the production values.
+// are the production values. One exception: getBackoffDelay (Client.swift) keeps
+// Double.random for its other callers.
 
 /// Monotonic and wall-clock time.
 internal protocol ClientClock {
@@ -14,24 +15,37 @@ internal protocol ClientClock {
     func wallMillis() -> Int64
 }
 
-/// Uniform random numbers in a closed range of Doubles.
+/// Uniform random numbers in a closed range.
 internal protocol ClientRandom {
+    /// A Double in the range (backoff and jitter).
     func uniform(_ range: ClosedRange<Double>) -> Double
+
+    /// A UInt64 in the range (msg_id lanes).
+    func uniform(_ range: ClosedRange<UInt64>) -> UInt64
 }
 
 /// Runs a work item on the client's queue after a delay. The caller keeps the item
 /// as its cancel handle.
 internal protocol ClientScheduler {
-    func schedule(after delay: TimeInterval, _ item: DispatchWorkItem)
+    /// Runs `item` after `delay`. With `lateGrace`, an item that fires much later than
+    /// scheduled (a suspended process) runs after the grace period instead; timeouts
+    /// pass true, the other timers false.
+    func schedule(after delay: TimeInterval, lateGrace: Bool, _ item: DispatchWorkItem)
 }
 
 /// Builds the scheduler of a client from its queue and clock.
 internal typealias ClientSchedulerFactory = (DispatchQueue, ClientClock) -> ClientScheduler
 
+/// The scheduler the public initializer of the client uses.
+internal let productionSchedulerFactory: ClientSchedulerFactory = { (queue: DispatchQueue, clock: ClientClock) -> ClientScheduler in
+    return DispatchClientScheduler(queue: queue, clock: clock)
+}
+
 internal struct SystemClientClock: ClientClock {
     internal func monotonicNanos() -> UInt64 {
         return DispatchTime.now().uptimeNanoseconds
     }
+
 
     internal func wallMillis() -> Int64 {
         return Int64(Date().timeIntervalSince1970 * 1000)
@@ -42,12 +56,17 @@ internal struct SystemClientRandom: ClientRandom {
     internal func uniform(_ range: ClosedRange<Double>) -> Double {
         return Double.random(in: range)
     }
+
+
+    internal func uniform(_ range: ClosedRange<UInt64>) -> UInt64 {
+        return UInt64.random(in: range)
+    }
 }
 
-/// Production scheduler: a DispatchQueue timer on the client's queue. A timer that
-/// fires much later than scheduled means the process was suspended (frozen in the
-/// background, stopped in a debugger): replies and pings that arrived meanwhile may
-/// still be waiting in the socket, so the item runs after a short grace period
+/// Production scheduler: a DispatchQueue timer on the client's queue. With `lateGrace`,
+/// a timer that fires much later than scheduled means the process was suspended (frozen
+/// in the background, stopped in a debugger): replies and pings that arrived meanwhile
+/// may still be waiting in the socket, so the item runs after a short grace period
 /// instead, letting them be handled first.
 internal final class DispatchClientScheduler: ClientScheduler {
     private let queue: DispatchQueue
@@ -58,10 +77,15 @@ internal final class DispatchClientScheduler: ClientScheduler {
         self.clock = clock
     }
 
-    internal func schedule(after delay: TimeInterval, _ item: DispatchWorkItem) {
-        let deadlineNanos: UInt64 = clock.monotonicNanos() + clientNanos(delay)
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let strongSelf = self, !item.isCancelled else {
+
+    internal func schedule(after delay: TimeInterval, lateGrace: Bool, _ item: DispatchWorkItem) {
+        if !lateGrace {
+            self.queue.asyncAfter(deadline: .now() + delay, execute: item)
+            return
+        }
+        let deadlineNanos: UInt64 = self.clock.monotonicNanos() + clientNanos(delay)
+        self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let strongSelf: DispatchClientScheduler = self, !item.isCancelled else {
                 return
             }
             let now: UInt64 = strongSelf.clock.monotonicNanos()
@@ -76,16 +100,21 @@ internal final class DispatchClientScheduler: ClientScheduler {
 }
 
 /// Nanoseconds of a delay in seconds, for deadlines computed from an injected clock.
-/// Negative delays count as zero; the value is capped far beyond any timer.
+/// A delay that is not above zero (negative or NaN) counts as zero; the value is capped
+/// far beyond any timer.
 internal func clientNanos(_ delay: TimeInterval) -> UInt64 {
-    let seconds: Double = min(max(delay, 0), 9e9)
+    if !(delay > 0) {
+        return 0
+    }
+    let seconds: Double = min(delay, 9e9)
     return UInt64(seconds * 1e9)
 }
 
 extension CentrifugeClient {
     /// Runs `item` on syncQueue once `delay` has passed. The hook of the timers that
     /// are not timeouts (reconnect, connection and subscription refresh, resubscribe).
+    /// They get no late-timer grace, as before the seams.
     internal func scheduleAfter(_ delay: TimeInterval, _ item: DispatchWorkItem) {
-        self.scheduler.schedule(after: delay, item)
+        self.scheduler.schedule(after: delay, lateGrace: false, item)
     }
 }
