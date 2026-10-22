@@ -106,7 +106,7 @@ final class Expectation: @unchecked Sendable {
 func fulfillment(
     of expectations: [Expectation],
     within timeout: TimeInterval,
-    sourceLocation: SourceLocation = #_sourceLocation
+    sourceLocation: SourceLocation
 ) async {
     let deadline = Date().addingTimeInterval(timeout)
 
@@ -147,9 +147,23 @@ func fulfillment(
 }
 
 func fulfillment(
+    of expectations: [Expectation],
+    within timeout: TimeInterval
+) async {
+    await fulfillment(of: expectations, within: timeout, sourceLocation: #_sourceLocation)
+}
+
+func fulfillment(
+    of expectation: Expectation,
+    within timeout: TimeInterval
+) async {
+    await fulfillment(of: [expectation], within: timeout, sourceLocation: #_sourceLocation)
+}
+
+func fulfillment(
     of expectation: Expectation,
     within timeout: TimeInterval,
-    sourceLocation: SourceLocation = #_sourceLocation
+    sourceLocation: SourceLocation
 ) async {
     await fulfillment(of: [expectation], within: timeout, sourceLocation: sourceLocation)
 }

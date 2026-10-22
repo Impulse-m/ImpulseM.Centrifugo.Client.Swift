@@ -45,8 +45,15 @@ import Testing
 
     private func assertThrows(
         _ delta: String,
+        _ expected: DeltaFossil.DeltaError
+    ) {
+        assertThrows(delta, expected, sourceLocation: #_sourceLocation)
+    }
+
+    private func assertThrows(
+        _ delta: String,
         _ expected: DeltaFossil.DeltaError,
-        sourceLocation: SourceLocation = #_sourceLocation
+        sourceLocation: SourceLocation
     ) {
         do {
             _ = try DeltaFossil.applyDelta(source: malformedOrigin, delta: Data(delta.utf8))
