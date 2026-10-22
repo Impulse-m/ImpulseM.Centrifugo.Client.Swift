@@ -48,6 +48,10 @@ final class SubscriptionRefreshRetryTests: @unchecked Sendable {
 
     init() throws {
         server = FakeCentrifugoServer()
+        // The fake server never pings. Its connect result gives no ping interval, so the client arms no ping
+        // watchdog; the default interval (25 s plus the 10 s server ping delay) would drop the connection on
+        // the manual clock, as the retry tests advance well past it.
+        server.connectResult.ping = 0
         // The subscription token expires after 10 seconds, so the refresh is armed on the manual clock.
         server.onSubscribe = { _, _ in
             var result: FakeCentrifugoServer.PSubscribeResult = FakeCentrifugoServer.PSubscribeResult()

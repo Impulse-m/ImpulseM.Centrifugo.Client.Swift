@@ -543,7 +543,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
                         )
                         return
                     case .end(let code, let message):
-                        self?.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
+                        strongSelf.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
                         return
                     case .retry(let refusedExpired):
                         if refusedExpired {
