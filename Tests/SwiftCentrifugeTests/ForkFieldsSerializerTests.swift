@@ -17,6 +17,7 @@ struct ForkFieldsSerializerTests {
     private typealias PConnectResult = Centrifugal_Centrifuge_Protocol_ConnectResult
     private typealias PDictionary = Centrifugal_Centrifuge_Protocol_Dictionary
 
+
     @Test func forkFieldsRoundTrip() throws {
         var request: PConnectRequest = PConnectRequest()
         request.dict = "dict-id"
@@ -57,6 +58,7 @@ struct ForkFieldsSerializerTests {
         #expect(decodedDictionary.data.isEmpty)
     }
 
+
     @Test func connectRequestFlagRoundTrip() throws {
         // Field 7 is upstream: tag (7 << 3) | varint = 0x38, followed by the value.
         var small: PConnectRequest = PConnectRequest()
@@ -71,28 +73,30 @@ struct ForkFieldsSerializerTests {
         #expect(decoded.flag == Int64(1) << 32)
     }
 
+
     @Test func upstreamShapedFrameIsAccepted() throws {
-        // A reply that uses only upstream fields, as a server without the fork
-        // fields would send it.
-        var result: PConnectResult = PConnectResult()
-        result.client = "client-id"
-        result.version = "6.8.2"
-        result.ping = 25
-        result.pong = true
-        var reply: PReply = PReply()
-        reply.id = 1
-        reply.connect = result
-        let stream: OutputStream = OutputStream.toMemory()
-        stream.open()
-        try BinaryDelimited.serialize(message: reply, to: stream)
-        stream.close()
-        let frame: Data = stream.property(forKey: .dataWrittenToMemoryStreamKey) as! Data
+        // A length-delimited reply encoded with the upstream 0.11.0 schema (protoc 34.0,
+        // `--encode=centrifugal.centrifuge.protocol.Reply`) from
+        // Reply { id: 1, connect { client: "client-id", version: "6.8.2", ping: 25, pong: true } }.
+        // It carries no fork fields, as a server without them sends it. Being a literal,
+        // it pins the upstream field numbers; a round trip through the generated codec
+        // would not.
+        let frame: Data = Data([
+            0x1a,
+            0x08, 0x01,
+            0x2a, 0x16,
+            0x0a, 0x09, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x2d, 0x69, 0x64,
+            0x12, 0x05, 0x36, 0x2e, 0x38, 0x2e, 0x32,
+            0x38, 0x19,
+            0x40, 0x01,
+        ])
 
         let replies: [PReply] = try CentrifugeSerializer.deserializeCommands(data: frame)
 
         #expect(replies.count == 1)
         #expect(replies[0].id == 1)
         #expect(replies[0].connect.client == "client-id")
+        #expect(replies[0].connect.version == "6.8.2")
         #expect(replies[0].connect.ping == 25)
         #expect(replies[0].connect.pong)
         #expect(replies[0].connect.flag == 0)

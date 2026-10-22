@@ -128,6 +128,16 @@ unbounded backlog. It follows that user code can re-enter any public API, so:
 The threading contract for users is documented on `CentrifugeClientDelegate` in
 `Sources/SwiftCentrifuge/Delegate.swift`; keep the two in sync.
 
+## Protocol
+
+`client.proto` is a copy of `definitions/client.proto` from `ImpulseM.Centrifugo.Protocol`
+(commit 70f37c2 at the last change). Never edit it here. On each upstream merge, take
+`client.proto` whole from that Protocol commit, run `make proto` (protoc 34.0 and
+protoc-gen-swift built from swift-protobuf tag 1.35.0, commit 9bbb079b), and commit the
+regenerated `client.pb.swift`. The proto-check workflow fails when the committed
+`client.pb.swift` differs from a regeneration. It does not compare `client.proto` with the
+Protocol repo, so the copy is kept in step by hand.
+
 ## Release
 
 `CHANGELOG.md` is updated only at release time ("prepare X.Y.Z" commits), not per
