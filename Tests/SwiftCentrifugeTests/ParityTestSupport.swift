@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 @testable import SwiftCentrifuge
 
 // Helpers of the tests of the parity features (instance, server time, identity). They are
