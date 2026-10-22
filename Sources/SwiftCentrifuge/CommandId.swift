@@ -7,12 +7,14 @@ import Foundation
 internal struct CommandIdCounter {
     private var last: UInt32
 
+
     internal init() {
         self.last = 0
     }
 
 
     /// Starts the counter at `last`, so the next id is `last + 1` (wrapping, skipping 0).
+    /// Only the wrap test uses it: reaching the wrap by 2^32 calls is too slow for a unit test.
     internal init(last: UInt32) {
         self.last = last
     }

@@ -6,19 +6,21 @@ import Testing
 /// The lanes come from ManualRandom, so every id is exact.
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class MsgIdGeneratorTests: @unchecked Sendable {
-
     private let secondsMask: UInt64 = (1 << 33) - 1
     private let sequenceMask: UInt64 = (1 << 20) - 1
     private let lowerLane: UInt64 = 0
     private let laneTop: UInt64 = (1 << 19) - 1
 
+
     private func timePart(_ id: UInt64) -> UInt64 {
         return id >> MsgIdGenerator.sequenceBits
     }
 
+
     private func sequencePart(_ id: UInt64) -> UInt64 {
         return id & sequenceMask
     }
+
 
     @Test func sameSecondIncrements() {
         let random: ManualRandom = ManualRandom(lanes: [7])
@@ -30,6 +32,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(sequencePart(first) == 7)
     }
 
+
     @Test func laterSecondRestartsAtTheLane() {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
@@ -40,6 +43,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(sequencePart(later) == 7)
     }
 
+
     @Test func backwardCorrectionHoldsTheTimePartAndKeepsIncreasing() {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
@@ -48,6 +52,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(timePart(behind) == 100)
         #expect(behind > before)
     }
+
 
     @Test func overflowMovesToTheNextSecond() throws {
         let random: ManualRandom = ManualRandom(lanes: [7])
@@ -71,6 +76,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(inSecond == MsgIdGenerator.sequenceLimit - 7)
     }
 
+
     @Test func resyncLowersTheTimePartAndChangesTheLane() {
         let random: ManualRandom = ManualRandom(lanes: [7, 300_000])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
@@ -82,6 +88,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(random.requestedRanges.count == 2, "a new second draws a new lane")
     }
 
+
     @Test func resyncToTheSameSecondContinuesTheSequence() {
         let random: ManualRandom = ManualRandom(lanes: [7])
         var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
@@ -92,6 +99,19 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(sequencePart(third) == 9)
         #expect(random.requestedRanges.count == 1, "the same second draws no lane")
     }
+
+
+    /// The first id takes the second of `now`, the start time, not the time of the first call.
+    /// A backward correction between the two keeps that second (JS and Java take the second of
+    /// the first call; the difference is recorded in the MsgIdGenerator doc comment).
+    @Test func firstIdKeepsTheSecondOfTheStartTime() {
+        let random: ManualRandom = ManualRandom(lanes: [7])
+        var generator: MsgIdGenerator = MsgIdGenerator(now: 100_000, random: random)
+        let first: UInt64 = generator.next(serverTimeMillis: 99_000)
+        #expect(timePart(first) == 100)
+        #expect(sequencePart(first) == 7)
+    }
+
 
     // Two generators with the production random source, started in the same second. A lane
     // is drawn from 2^19 values, so the 20 pairs are all equal only if the source is ignored.
@@ -109,6 +129,7 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(equalPairs < 20, "the default random source gives different lanes")
     }
 
+
     @Test func largestTimePartFitsFiftyThreeBits() {
         let random: ManualRandom = ManualRandom()
         var generator: MsgIdGenerator = MsgIdGenerator(now: 0, random: random)
@@ -117,12 +138,14 @@ final class MsgIdGeneratorTests: @unchecked Sendable {
         #expect(id < UInt64(1) << 53)
     }
 
+
     @Test func timePartBeyondThirtyThreeBitsIsClamped() {
         let random: ManualRandom = ManualRandom()
         var generator: MsgIdGenerator = MsgIdGenerator(now: 0, random: random)
         let id: UInt64 = generator.next(serverTimeMillis: Int64.max)
         #expect(timePart(id) == secondsMask)
     }
+
 
     // The range [0, 2^19) holds 2^19 values, 19 bits; the name is the spec's canonical row name.
     @Test func laneIsDrawnFromTheNineteenBitsRange() {

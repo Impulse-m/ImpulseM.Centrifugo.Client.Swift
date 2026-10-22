@@ -9,23 +9,22 @@ import Foundation
 
 /// A clock the test moves by hand.
 final class ManualClock: ClientClock, @unchecked Sendable {
-    private let lock: NSLock = NSLock()
-    private var nanos: UInt64 = 1_000_000_000
+    private let nanos: LockedBox<UInt64> = LockedBox(1_000_000_000)
+
 
     func monotonicNanos() -> UInt64 {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return nanos
+        return nanos.current
     }
 
+
     func advance(by delta: TimeInterval) {
-        lock.lock()
-        nanos += clientNanos(delta)
-        lock.unlock()
+        let step: UInt64 = clientNanos(delta)
+        nanos.update { (value: inout UInt64) in
+            value += step
+        }
     }
 }
+
 
 /// A random source the test controls. The scripted values are returned first, in order;
 /// after them a draw takes the position `draw` in the range: 0 gives the lower bound, 1
@@ -36,10 +35,12 @@ final class ManualRandom: ClientRandom, @unchecked Sendable {
     private var lanes: [UInt64]
     private var integerRanges: [ClosedRange<UInt64>] = []
 
+
     init(draw: Double = 0, lanes: [UInt64] = []) {
         self.draw = draw
         self.lanes = lanes
     }
+
 
     /// The ranges asked for so far, in order.
     var requestedRanges: [ClosedRange<UInt64>] {
@@ -49,6 +50,7 @@ final class ManualRandom: ClientRandom, @unchecked Sendable {
         }
         return integerRanges
     }
+
 
     func uniform(_ range: ClosedRange<UInt64>) -> UInt64 {
         lock.lock()
@@ -64,42 +66,56 @@ final class ManualRandom: ClientRandom, @unchecked Sendable {
     }
 }
 
+
+/// One call of `ManualScheduler.schedule`, as the test sees it.
+struct ScheduledCall {
+    let delay: TimeInterval
+    let lateGrace: Bool
+}
+
+
 /// Holds work items until the test advances the clock past their due time. The late-timer
-/// grace of DispatchClientScheduler does not apply here: an item runs when it is due.
+/// grace of DispatchClientScheduler does not apply here: an item runs when it is due. The
+/// grace flag of each call is recorded, so a test can check which timers ask for it.
 final class ManualScheduler: ClientScheduler, @unchecked Sendable {
-    /// The delay of every item scheduled so far, in order.
-    var scheduledDelays: [TimeInterval] {
+    /// Every call of `schedule` so far, in order.
+    var scheduledCalls: [ScheduledCall] {
         lock.lock()
         defer {
             lock.unlock()
         }
-        return delays
+        return calls
     }
+
 
     private struct Pending {
         let due: UInt64
         let item: DispatchWorkItem
     }
 
+
     private let lock: NSLock = NSLock()
     private let queue: DispatchQueue
     private let clock: ManualClock
     // In insertion order; among equal due times the earlier insertion runs first.
     private var pending: [Pending] = []
-    private var delays: [TimeInterval] = []
+    private var calls: [ScheduledCall] = []
+
 
     init(queue: DispatchQueue, clock: ManualClock) {
         self.queue = queue
         self.clock = clock
     }
 
+
     func schedule(after delay: TimeInterval, lateGrace: Bool, _ item: DispatchWorkItem) {
         lock.lock()
         let due: UInt64 = clock.monotonicNanos() + clientNanos(delay)
         pending.append(Pending(due: due, item: item))
-        delays.append(delay)
+        calls.append(ScheduledCall(delay: delay, lateGrace: lateGrace))
         lock.unlock()
     }
+
 
     /// Moves the clock by `delta`, then runs every due item on the client's queue, in due
     /// order. Items that the run schedules and that are due by then run too. Returns once
@@ -114,11 +130,13 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
         }
     }
 
+
     private func runDueItems() {
         while let item: DispatchWorkItem = takeNextDue() {
             item.perform()
         }
     }
+
 
     /// The earliest due item that is not cancelled, removed from the pending list.
     private func takeNextDue() -> DispatchWorkItem? {
@@ -135,6 +153,7 @@ final class ManualScheduler: ClientScheduler, @unchecked Sendable {
         }
         return nil
     }
+
 
     private func earliestDueIndex(now: UInt64) -> Int? {
         var best: Int? = nil

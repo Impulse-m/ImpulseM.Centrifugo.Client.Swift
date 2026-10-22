@@ -222,7 +222,7 @@ public enum CentrifugeClientState: Sendable {
 }
 
 /// How long a timeout that fired late (after the process was suspended) waits for
-/// what arrived meanwhile. See `scheduleTimeout`.
+/// what arrived meanwhile. See `DispatchClientScheduler.schedule` in Scheduler.swift.
 let lateTimerGrace: TimeInterval = 1
 
 public class CentrifugeClient: @unchecked Sendable {
@@ -290,23 +290,40 @@ public class CentrifugeClient: @unchecked Sendable {
         self.config = config
         self.delegate = delegate
         self.log = config.logger ?? EmptyLogger.instance
-
+        
         self.token = config.token;
-
+        
         if config.data != nil {
             self.data = config.data;
         }
-
+        
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
         self.scheduler = DispatchClientScheduler(queue: self.syncQueue, clock: SystemClientClock())
-        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
-        self.logTransportChoice()
-    }
+        
+        var request = URLRequest(url: URL(string: self.url)!)
+        for (key, value) in self.config.headers {
+            request.addValue(value, forHTTPHeaderField: key)
+        }
 
+        self.request = request
+
+        if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), config.useNativeWebSocket {
+            log.info("Using NativeWebSocket")
+        } else {
+            // Either useNativeWebSocket is off, or the OS is too old for
+            // URLSessionWebSocketTask (iOS < 13.0 and equivalents).
+            log.info("Using StarscreamWebSocket")
+            if config.tlsChallengeHandler != nil {
+                log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
+            }
+        }
+    }
+    
     /// Initialize client with the clock and scheduler seams (see Scheduler.swift). The public
     /// initializer above passes the production values; tests reach this one through
-    /// `@testable import`. The two initializers differ only in the scheduler.
+    /// `@testable import`. The body repeats the public one, because both initializers are
+    /// designated: a subclass calls the public one with `super.init`.
     internal init(
         endpoint: String,
         config: CentrifugeClientConfig,
@@ -325,21 +342,11 @@ public class CentrifugeClient: @unchecked Sendable {
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
         self.scheduler = schedulerFactory(self.syncQueue, clock)
-        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
-        self.logTransportChoice()
-    }
-
-    /// The request of the endpoint, with the headers of the config.
-    private static func makeRequest(endpoint: String, config: CentrifugeClientConfig) -> URLRequest {
         var request = URLRequest(url: URL(string: endpoint)!)
         for (key, value) in config.headers {
             request.addValue(value, forHTTPHeaderField: key)
         }
-        return request
-    }
-
-    /// Logs the transport the client uses. Called once all stored properties are set.
-    private func logTransportChoice() {
+        self.request = request
         if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), config.useNativeWebSocket {
             log.info("Using NativeWebSocket")
         } else {
@@ -351,7 +358,7 @@ public class CentrifugeClient: @unchecked Sendable {
             }
         }
     }
-    
+
     /**
      Connect to server.
      */
@@ -636,11 +643,7 @@ internal extension CentrifugeClient {
         }
     }
     
-    /// Runs `item` on syncQueue once `delay` has passed, for timeouts. A timer that
-    /// fires much later than scheduled means the process was suspended (frozen in
-    /// the background, stopped in a debugger): replies and pings that arrived
-    /// meanwhile may still be waiting in the socket, so the item runs after a short
-    /// grace period instead, letting them be handled first.
+    /// Runs `item` on syncQueue after `delay`, with the late-timer grace of timeouts.
     func scheduleTimeout(after delay: TimeInterval, _ item: DispatchWorkItem) {
         self.scheduler.schedule(after: delay, lateGrace: true, item)
     }

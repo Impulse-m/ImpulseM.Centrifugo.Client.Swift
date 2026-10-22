@@ -46,10 +46,11 @@ internal struct SystemClientRandom: ClientRandom {
 /// a timer that fires much later than scheduled means the process was suspended (frozen
 /// in the background, stopped in a debugger): replies and pings that arrived meanwhile
 /// may still be waiting in the socket, so the item runs after a short grace period
-/// instead, letting them be handled first.
+/// instead, letting them be handled first. The late-timer rule lives only here.
 internal final class DispatchClientScheduler: ClientScheduler {
     private let queue: DispatchQueue
     private let clock: ClientClock
+
 
     internal init(queue: DispatchQueue, clock: ClientClock) {
         self.queue = queue
@@ -77,6 +78,7 @@ internal final class DispatchClientScheduler: ClientScheduler {
         }
     }
 }
+
 
 /// Nanoseconds of a delay in seconds, for deadlines computed from an injected clock.
 /// A delay that is not above zero (negative or NaN) counts as zero; the value is capped

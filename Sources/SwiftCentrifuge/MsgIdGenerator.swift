@@ -35,8 +35,12 @@ internal struct MsgIdGenerator {
     // The sequence the next msg_id of lastSeconds takes.
     private var nextSeq: UInt64
 
+
     /// - Parameters:
-    ///   - now: the corrected server time in milliseconds when the generator starts.
+    ///   - now: the corrected server time in milliseconds when the generator starts. The
+    ///     first id takes the time part of `now`, not the time of the first call: a backward
+    ///     correction between the two keeps the second of `now`. JS and Java take the second
+    ///     of the first call instead; the difference only shows for such a correction.
     ///   - random: draws the lanes.
     internal init(now: Int64, random: ClientRandom) {
         self.random = random
@@ -45,6 +49,7 @@ internal struct MsgIdGenerator {
         self.lastSeconds = MsgIdGenerator.clampSeconds(now)
         self.nextSeq = drawn
     }
+
 
     /// The msg_id of a call written now, for the corrected server time in milliseconds.
     /// The time part never moves back on its own: an earlier server time keeps the last
@@ -69,6 +74,7 @@ internal struct MsgIdGenerator {
         return (seconds << MsgIdGenerator.sequenceBits) + seq
     }
 
+
     /// Re-syncs the time part to the corrected second of a reply that refused a msg_id
     /// as outside the server window. A second equal to the last keeps its sequence, so
     /// its ids continue. Any other second takes a fresh lane. A backward re-sync can
@@ -83,6 +89,7 @@ internal struct MsgIdGenerator {
         self.lane = self.random.uniform(0 ... MsgIdGenerator.laneBound - 1)
         self.nextSeq = self.lane
     }
+
 
     /// Seconds of a server time, clamped to the 33-bit time part.
     private static func clampSeconds(_ serverTimeMillis: Int64) -> UInt64 {
