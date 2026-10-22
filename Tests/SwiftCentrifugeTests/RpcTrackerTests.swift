@@ -232,8 +232,14 @@ final class RpcTrackerTests: @unchecked Sendable {
         try #require(sent.count == 4)
         let resent: [RpcCommand] = Array(sent.suffix(2))
         #expect(resent[0].rpc.msgID < resent[1].rpc.msgID, "the resends go out in msg_id order")
-        #expect(resent.allSatisfy { (command: RpcCommand) -> Bool in command.rpc.retransmit })
-        #expect(Set(sent.map { (command: RpcCommand) -> UInt32 in command.id }).count == 4, "every write takes a fresh command id")
+        let resentWithRetransmit: Bool = resent.allSatisfy { (command: RpcCommand) -> Bool in
+            return command.rpc.retransmit
+        }
+        #expect(resentWithRetransmit)
+        let commandIds: Set<UInt32> = Set(sent.map { (command: RpcCommand) -> UInt32 in
+            return command.id
+        })
+        #expect(commandIds.count == 4, "every write takes a fresh command id")
     }
 
 
@@ -460,7 +466,7 @@ final class RpcTrackerTests: @unchecked Sendable {
         } else {
             Issue.record("the next call should wait, not be refused: \(String(describing: next.outcome.result))")
         }
-        for handle: (call: CentrifugeRpcCall, outcome: CallOutcome) in handles.dropFirst() {
+        for handle in handles.dropFirst() {
             await fulfillment(of: handle.outcome.done, within: 5)
         }
     }
