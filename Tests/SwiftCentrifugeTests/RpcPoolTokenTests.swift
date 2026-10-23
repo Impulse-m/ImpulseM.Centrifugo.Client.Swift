@@ -32,6 +32,32 @@ private final class TokenPoolOutcome: @unchecked Sendable {
 }
 
 
+/// The outcome of one token request of a pool connection, filled on the main client's queue and awaited by the test.
+private final class TokenAnswer: @unchecked Sendable {
+    let done: Expectation
+    private let value: LockedBox<Result<String, Error>?> = LockedBox(nil)
+
+
+    init(_ description: String) {
+        self.done = Expectation(description)
+    }
+
+
+    var error: CentrifugeError? {
+        guard case .failure(let error)? = value.current else {
+            return nil
+        }
+        return error as? CentrifugeError
+    }
+
+
+    func record(_ result: Result<String, Error>) {
+        value.set(result)
+        done.fulfill()
+    }
+}
+
+
 /// A short name for the outcome of a call, so a test checks the kind and the code.
 private func kindOf(_ error: CentrifugeError?) -> String {
     guard let value: CentrifugeError = error else {
@@ -148,6 +174,10 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         let setup: ManualClientSetup = makeManualClient(endpoint: mainServer.url, config: config, delegate: delegate)
         setup.client.connect()
         await fulfillment(of: connected, within: 5)
+        let reconnecting: Expectation = Expectation("main reconnecting")
+        delegate.onConnectingEvent = { (_: CentrifugeConnectingEvent) -> Void in
+            reconnecting.fulfill()
+        }
 
         // idleTimeout 0 keeps the connection open, so only the session end can close it.
         let pool: CentrifugeRpcPool = CentrifugeRpcPool(
@@ -162,8 +192,12 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         #expect(kindOf(outcome.error) == "none")
         #expect(pool.stats().connections == 1)
 
-        // The main client reconnects after the server's invalidation, asks its getter, and the session ends.
+        // The main client reconnects after the server's invalidation, asks its getter, and the session ends. The advance
+        // runs the reconnect, so it waits until the client has taken the invalidation: `onConnecting` is delivered on the
+        // client's queue, and the sync point after it runs once the reconnect is scheduled.
         mainServer.disconnect(3014, "state invalidated")
+        await fulfillment(of: reconnecting, within: 5)
+        await awaitSyncQueue(setup.client)
         await setup.scheduler.advance(by: 30)
         await fulfillment(of: ended, within: 5)
         await awaitSyncQueue(setup.client)
@@ -306,6 +340,73 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         await fake.awaitArrivals("pool connect", count: 2, connectWithToken("t-main"))
         await fulfillment(of: outcome.done, within: 10)
         #expect(kindOf(outcome.error) == "clientRejected 3 token refused")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func confirmationWithAnotherUserRetiresTheConnection() async throws {
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "t-main"
+        let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
+
+        // From now on the server confirms another user for every connect. The main client keeps the user it confirmed, so
+        // the connection of the pool carries an identity that the generation does not have.
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasConnect else {
+                return nil
+            }
+            var connected: Centrifugal_Centrifuge_Protocol_ConnectResult = Centrifugal_Centrifuge_Protocol_ConnectResult()
+            connected.client = "fake-client"
+            connected.user = "u2"
+            var reply: RpcReply = RpcReply()
+            reply.connect = connected
+            return reply
+        }
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(tokenFrom: true))
+        let outcome: TokenPoolOutcome = TokenPoolOutcome("call on a connection of another user")
+        pool.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: outcome.done, within: 5)
+        // The connection retired and its token is unusable: the call that waited for a connection fails with token refused.
+        #expect(kindOf(outcome.error) == "clientRejected 3 token refused")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func connectionOfAnEndedGenerationIsRefusedItsNextToken() async throws {
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "t-main"
+        let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
+        let source: RpcPoolTokenSource = RpcPoolTokenSource.forClient(main.client)
+        let owner: RpcPoolConnectionToken = RpcPoolConnectionToken(source: source)
+        // The source is seeded on the queue: the sync point makes the confirmed token visible to the request below.
+        await awaitSyncQueue(main.client)
+
+        // The connection takes its first token at generation 0, and stamps itself with it.
+        let first: TokenAnswer = TokenAnswer("first token")
+        main.client.syncQueue.async {
+            source.request(owner: owner) { (result: Result<String, Error>) -> Void in
+                first.record(result)
+            }
+        }
+        await fulfillment(of: first.done, within: 5)
+        #expect(kindOf(first.error) == "none")
+        #expect(owner.stamped)
+        #expect(owner.generation == 0)
+
+        // The server confirms another user: the generation moves on. The connection asks for a token again and is refused.
+        let second: TokenAnswer = TokenAnswer("token of the ended generation")
+        main.client.syncQueue.async {
+            main.client.identity.applyConnect(user: "u2", authClass: "")
+            source.connectConfirmed()
+            source.request(owner: owner) { (result: Result<String, Error>) -> Void in
+                second.record(result)
+            }
+        }
+        await fulfillment(of: second.done, within: 5)
+        #expect(kindOf(second.error) == "unauthorized")
+        #expect(owner.generation == 0)
         withExtendedLifetime(main.delegate) {}
     }
 }

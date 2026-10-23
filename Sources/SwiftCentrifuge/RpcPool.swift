@@ -698,13 +698,22 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
 
 
     /// The connection of an endpoint confirmed its connect: it takes calls now.
-    internal func connectionConnected(_ conn: RpcPoolConnection) {
+    internal func connectionConnected(_ conn: RpcPoolConnection, user: String, authClass: String) {
         if closed || conn.closed {
             return
         }
         if conn.generation != currentGeneration() {
             // The identity moved on while it connected: the connection retires at this event (R5.2).
             closeConnection(conn)
+            drainAll()
+            publishStats()
+            return
+        }
+        if let source: RpcPoolTokenSource = tokenSource, !source.confirmsIdentity(user: user, authClass: authClass) {
+            // The server confirmed another identity than the one of the generation: the token is unusable, and the
+            // connection retires. The source's notice then places the waiting calls again.
+            closeConnection(conn)
+            source.markUnusable(conn.presentedToken)
             drainAll()
             publishStats()
             return

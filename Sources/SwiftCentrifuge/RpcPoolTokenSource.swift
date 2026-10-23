@@ -53,9 +53,13 @@ internal final class RpcPoolConnectionToken {
     /// The token the connection presented last. Empty before its first token.
     internal private(set) var presented: String = ""
 
-    /// The identity generation of the presented token. A connection whose generation is not the current one is retired.
-    /// A connection starts with the current generation, and takes the generation of its first token.
+    /// The identity generation of the connection. It is set once, by the first token lent to the connection, and never
+    /// moves on: a connection whose generation is not the current one is retired at its next token request. Until the
+    /// first token it holds the generation the source had when the connection was made.
     internal private(set) var generation: UInt64
+
+    /// Whether a token was lent to the connection, which fixes its generation.
+    internal private(set) var stamped: Bool = false
 
     private let source: RpcPoolTokenSource
 
@@ -78,10 +82,14 @@ internal final class RpcPoolConnectionToken {
     }
 
 
-    /// Records the token the connection was lent, and the generation it belongs to.
+    /// Records the token the connection was lent. The first token fixes the generation of the connection; later tokens
+    /// never move it.
     internal func lend(_ token: String, generation: UInt64) {
         self.presented = token
-        self.generation = generation
+        if !stamped {
+            stamped = true
+            self.generation = generation
+        }
     }
 }
 
@@ -131,12 +139,16 @@ internal final class RpcPoolTokenSource {
 
 
     /// The source of a main client. The first pool that takes its token from the client makes it, and the client keeps it.
+    /// A client that is already connected when the source is made is seeded on the queue, before the pool's first call.
     internal static func forClient(_ main: CentrifugeClient) -> RpcPoolTokenSource {
         if let existing: RpcPoolTokenSource = main.poolTokenSource {
             return existing
         }
         let made: RpcPoolTokenSource = RpcPoolTokenSource(main: main)
         main.poolTokenSource = made
+        made.queue.async { [weak made] () -> Void in
+            made?.seedIfConnected()
+        }
         return made
     }
 
@@ -171,9 +183,39 @@ internal final class RpcPoolTokenSource {
             waiting[key] = nil
             replaced.completion(.failure(CentrifugeError.unauthorized))
         }
+        if owner.stamped && owner.generation != generationCount {
+            // A connection of an ended generation is retired: its token request is refused.
+            completion(.failure(CentrifugeError.unauthorized))
+            return
+        }
         let waiter: RpcPoolTokenWaiter = RpcPoolTokenWaiter(owner: owner, refused: owner.presented, completion: completion)
         waiting[key] = waiter
         step(key)
+    }
+
+
+    /// Takes the confirmation of a main client that is connected when its source is made. Runs on the queue.
+    internal func seedIfConnected() {
+        guard let main: CentrifugeClient = self.main, main.state == .connected else {
+            return
+        }
+        connectConfirmed()
+    }
+
+
+    /// Whether the identity a connection of the pool confirmed is the identity of the current generation.
+    internal func confirmsIdentity(user: String, authClass: String) -> Bool {
+        return user == self.user && authClass == self.authClass
+    }
+
+
+    /// Marks a token unusable: a connection confirmed another identity with it. The token is spent until the main client's
+    /// next confirmation, so no connection is lent it again.
+    internal func markUnusable(_ token: String) {
+        if token.isEmpty {
+            return
+        }
+        spend(token)
     }
 
 
@@ -321,12 +363,17 @@ internal final class RpcPoolTokenSource {
     }
 
 
-    /// Delivers a token to a waiting request, and stamps the connection with the generation of the token.
+    /// Delivers a token to a waiting request. A connection stamped with an older generation than the current one is retired
+    /// instead: the token is of another generation than the one the connection belongs to.
     private func deliver(_ key: ObjectIdentifier, _ token: String) {
         guard let waiter: RpcPoolTokenWaiter = waiting[key] else {
             return
         }
         waiting[key] = nil
+        if waiter.owner.stamped && waiter.owner.generation != generationCount {
+            waiter.completion(.failure(CentrifugeError.unauthorized))
+            return
+        }
         waiter.owner.lend(token, generation: generationCount)
         waiter.completion(.success(token))
     }

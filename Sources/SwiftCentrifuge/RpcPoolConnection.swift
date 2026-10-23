@@ -54,6 +54,15 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     }
 
 
+    /// The token the connection presented last, empty without a token source.
+    internal var presentedToken: String {
+        guard let box: RpcPoolConnectionToken = self.tokenBox else {
+            return ""
+        }
+        return box.presented
+    }
+
+
     /// The token state of the connection, with a pool that takes its token from the main client (nil otherwise).
     private let tokenBox: RpcPoolConnectionToken?
 
@@ -81,9 +90,12 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     }
 
 
+    /// The identity the server confirmed is read here, on the client's queue, and handed to the pool with the event.
     internal func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
+        let user: String = client.identity.user
+        let authClass: String = client.identity.authClass
         self.forward { (owner: CentrifugeRpcPool, connection: RpcPoolConnection) -> Void in
-            owner.connectionConnected(connection)
+            owner.connectionConnected(connection, user: user, authClass: authClass)
         }
     }
 

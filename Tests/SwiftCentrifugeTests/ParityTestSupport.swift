@@ -153,6 +153,7 @@ final class ClosureClientDelegate: CentrifugeClientDelegate, @unchecked Sendable
     var onConn: (() -> Void)?
     var onErr: ((CentrifugeErrorEvent) -> Void)?
     var onDisc: ((CentrifugeDisconnectedEvent) -> Void)?
+    var onConnectingEvent: ((CentrifugeConnectingEvent) -> Void)?
     var onAuthEvent: ((CentrifugeAuthEvent) -> Void)?
 
 
@@ -168,6 +169,11 @@ final class ClosureClientDelegate: CentrifugeClientDelegate, @unchecked Sendable
 
     func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {
         onDisc?(event)
+    }
+
+
+    func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {
+        onConnectingEvent?(event)
     }
 
 
