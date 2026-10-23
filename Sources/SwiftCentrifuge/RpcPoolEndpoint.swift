@@ -18,6 +18,13 @@ internal final class RpcPoolEndpoint {
     /// Connections of the endpoint that ended for good without a connect in between. Sets the length of the hold.
     internal var failures: Int = 0
 
+    /// The calls that wait in a line or in a later resend's delay, under a key that resolves to this endpoint. A
+    /// connection event reads it in place of a scan of the lines.
+    internal var queuedWaits: Int = 0
+
+    /// The endpoint keys with calls in a line that resolve to this endpoint. A connection event drains these keys only.
+    internal var lineKeys: Set<String> = []
+
 
     internal init(url: String) {
         self.url = url

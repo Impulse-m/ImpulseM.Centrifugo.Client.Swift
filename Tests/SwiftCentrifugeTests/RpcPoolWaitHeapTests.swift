@@ -33,6 +33,17 @@ private func waitDeadline(_ index: Int) -> TimeInterval {
 }
 
 
+/// The reply of a server refusal with the later retry signal, as the server sends it (the same as RpcPoolTests).
+private func waitLaterRefusalReply() -> RpcReply {
+    return rpcErrorReply(
+        code: 111,
+        message: "too many requests",
+        temporary: true,
+        metadata: [rpcRetryMetadataKey: rpcRetryValueLater]
+    )
+}
+
+
 /// Admits a waiting call. Its completion appends the label and the outcome of the call to the log, on the pool's queue.
 @discardableResult
 private func admitWaiting(
@@ -207,6 +218,71 @@ final class RpcPoolWaitHeapTests: @unchecked Sendable {
 
         holding.cancel()
         await awaitSyncQueue(main.client)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func settledCallsBehindALongWaitingCallLeaveABoundedDueHeap() async throws {
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc
+        }
+        let main: WaitHarness = await connectedMain()
+        let (pool, holding): (CentrifugeRpcPool, CentrifugeRpcCall) = await startFullPool(main)
+        let fired: LockedBox<[String]> = LockedBox<[String]>([])
+
+        // One call waits for a long time. Each later call is cancelled at once, so each leaves an entry behind.
+        admitWaiting(pool, "long", timeout: 60, log: fired)
+        for index: Int in 0 ..< 200 {
+            let call: CentrifugeRpcCall = admitWaiting(pool, "\(index)", timeout: waitDeadline(index), log: fired)
+            call.cancel()
+        }
+        await awaitSyncQueue(main.client)
+        let entries: Int = main.client.syncQueue.sync { () -> Int in
+            return pool.dueEntryCount
+        }
+        #expect(fired.current.count == 200, "every cancelled call settles")
+        #expect(entries <= 2, "the heap keeps about one entry per waiting call, not one per settled call")
+
+        holding.cancel()
+        await awaitSyncQueue(main.client)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func aLaterResendArmsTheTimerOnceAtItsDelay() async throws {
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            if command.hasRpc {
+                return waitLaterRefusalReply()
+            }
+            return nil
+        }
+        let main: WaitHarness = await connectedMain()
+        let url: String = fake.server.url
+        let options: CentrifugeRpcPoolOptions = CentrifugeRpcPoolOptions(
+            endpoints: { (_: String) -> [String] in
+                return [url]
+            },
+            retries: 1
+        )
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: options)
+        let armed: Expectation = Expectation("later resend armed")
+        let arms: LockedBox<Int> = LockedBox<Int>(0)
+        main.scheduler.observe { (call: ScheduledCall) -> Void in
+            guard call.lateGrace else {
+                return
+            }
+            if arms.current == 0 {
+                armed.fulfill()
+            }
+            arms.update { (count: inout Int) -> Void in
+                count += 1
+            }
+        }
+        pool.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (_: Result<CentrifugeRpcResult, Error>) -> Void in
+        }
+        await fulfillment(of: armed, within: 5)
+        await awaitSyncQueue(main.client)
+        #expect(arms.current == 1, "the refusal arms the timer once, for the end of the resend's delay")
         withExtendedLifetime(main.delegate) {}
     }
 }

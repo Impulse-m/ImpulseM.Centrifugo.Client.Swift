@@ -36,6 +36,12 @@ internal struct RpcMinHeap<Element: RpcTimed> {
     }
 
 
+    /// The number of entries, including the ones that have not been dropped from the front yet.
+    var count: Int {
+        return self.items.count
+    }
+
+
     mutating func push(_ item: Element) {
         self.items.append(item)
         var index: Int = self.items.count - 1
@@ -60,7 +66,25 @@ internal struct RpcMinHeap<Element: RpcTimed> {
             return
         }
         self.items[0] = last
-        var index: Int = 0
+        self.siftDown(from: 0)
+    }
+
+
+    /// Removes every entry that the predicate rejects, then restores the heap order. The cost is linear in the entries
+    /// it scans, so a caller that runs it when the entries outnumber the live ones twofold pays O(1) amortised per entry.
+    mutating func keep(_ predicate: (Element) -> Bool) {
+        self.items = self.items.filter(predicate)
+        var index: Int = self.items.count / 2 - 1
+        while index >= 0 {
+            self.siftDown(from: index)
+            index -= 1
+        }
+    }
+
+
+    /// Moves the entry at `start` down until neither child is earlier.
+    private mutating func siftDown(from start: Int) {
+        var index: Int = start
         while true {
             let left: Int = 2 * index + 1
             let right: Int = left + 1

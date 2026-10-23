@@ -21,6 +21,30 @@ struct RpcDeadlinesTests {
     }
 
 
+    @Test func keepDropsTheRejectedEntriesAndKeepsTheTimeOrder() {
+        var heap: RpcDueHeap = RpcDueHeap()
+        let values: [UInt64] = sequence(count: 1_000)
+        for entry: (offset: Int, element: UInt64) in values.enumerated() {
+            heap.push(RpcDue(nanos: entry.element, seq: entry.offset, resend: false))
+        }
+        heap.keep { (due: RpcDue) -> Bool in
+            return due.seq % 3 == 0
+        }
+        let kept: [UInt64] = values.enumerated().filter { (entry: (offset: Int, element: UInt64)) -> Bool in
+            return entry.offset % 3 == 0
+        }.map { (entry: (offset: Int, element: UInt64)) -> UInt64 in
+            return entry.element
+        }
+        #expect(heap.count == kept.count, "only the kept entries remain")
+        var popped: [UInt64] = []
+        while let due: RpcDue = heap.earliest {
+            popped.append(due.nanos)
+            heap.pop()
+        }
+        #expect(popped == kept.sorted(), "the kept entries come out, earliest first")
+    }
+
+
     @Test func theHeapPopsTenThousandEntriesInTimeOrder() {
         var heap: RpcDueHeap = RpcDueHeap()
         let values: [UInt64] = sequence(count: 10_000)

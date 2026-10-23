@@ -392,19 +392,6 @@ internal final class RpcPoolFetches {
     }
 
 
-    /// The calls of the fetches that run or wait, for the pool's deadline timer.
-    internal var calls: [RpcPoolCall] {
-        var all: [RpcPoolCall] = []
-        for fetch: RpcPoolFetch in running {
-            all.append(fetch.call)
-        }
-        for fetch: RpcPoolFetch in waiting {
-            all.append(fetch.call)
-        }
-        return all
-    }
-
-
     /// Adds a fetch to the line, and starts the fetches that a free slot takes.
     internal func request(_ fetch: RpcPoolFetch) {
         waiting.append(fetch)
@@ -412,41 +399,14 @@ internal final class RpcPoolFetches {
     }
 
 
-    /// Removes the fetch of a call, cancelling it when it runs. Returns false when the call has no fetch.
+    /// Removes the fetch of a call, cancelling it when it runs, and starts the waiting fetches that a slot takes. The
+    /// pool calls it when a fetch's deadline passes, so no fetch list is scanned for it. Returns false when the call has no fetch.
     internal func cancel(_ call: RpcPoolCall) -> Bool {
         if take(call) == nil {
             return false
         }
         startWaiting()
         return true
-    }
-
-
-    /// Ends the fetches whose call deadline passed, cancelling those that run, and starts the waiting fetches that a
-    /// slot now takes. Returns the calls that expired.
-    internal func expire(now: UInt64) -> [RpcPoolCall] {
-        var expired: [RpcPoolCall] = []
-        var keptRunning: [RpcPoolFetch] = []
-        for fetch: RpcPoolFetch in running {
-            if fetch.call.deadline <= now {
-                fetch.task?.cancel()
-                expired.append(fetch.call)
-            } else {
-                keptRunning.append(fetch)
-            }
-        }
-        running = keptRunning
-        var keptWaiting: [RpcPoolFetch] = []
-        for fetch: RpcPoolFetch in waiting {
-            if fetch.call.deadline <= now {
-                expired.append(fetch.call)
-            } else {
-                keptWaiting.append(fetch)
-            }
-        }
-        waiting = keptWaiting
-        startWaiting()
-        return expired
     }
 
 
