@@ -29,6 +29,10 @@ internal final class RpcPoolCall {
     /// Whether the call still holds a slot of `connection`: set at placement, cleared when the connection answers.
     internal var holdsSlot: Bool = false
 
+    /// The handle of the call on its connection. Cancelling the pool call cancels it too, so the connection answers
+    /// it at once and the slot is released without waiting for the connection's own timeout.
+    internal var innerCall: CentrifugeRpcCall? = nil
+
     /// The resends the call has made, of any cause (a loss, a later refusal, a move). `retries` bounds it.
     internal var resends: Int = 0
 

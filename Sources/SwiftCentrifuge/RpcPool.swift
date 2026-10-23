@@ -486,7 +486,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         call.holdsSlot = true
         conn.inFlight += 1
         let queue: DispatchQueue = self.queue
-        conn.client.rpc(
+        let handle: CentrifugeRpcCall = conn.client.rpc(
             method: call.method,
             data: call.data,
             options: CentrifugeRpcOptions(headers: headers, timeout: timeout)
@@ -496,6 +496,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
                 self.innerDone(call, result)
             }
         }
+        call.innerCall = handle
     }
 
 
@@ -669,7 +670,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
 
 
     /// Cancels a call. A waiting call leaves its line and fails at once. A call in flight fails at once too, and its
-    /// connection still answers it, which releases its slot without a second completion.
+    /// connection call is cancelled, so the connection answers it now and releases the slot without a second completion.
     private func cancel(_ call: RpcPoolCall) {
         if removeFromLine(call) || removeFromResendWaits(call) {
             settle(call, .failure(cancelledCallError()))
@@ -677,6 +678,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         } else {
             _ = fetches.cancel(call)
             settle(call, .failure(cancelledCallError()))
+            call.innerCall?.cancel()
             updateWaitTimer()
         }
         publishStats()
