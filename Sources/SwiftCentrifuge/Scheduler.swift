@@ -195,6 +195,12 @@ internal struct ClientDeadlineTimer {
     }
 
 
+    /// Whether a timer is armed and has not run yet.
+    var isArmed: Bool {
+        return self.item != nil
+    }
+
+
     /// Cancels the armed timer, if any.
     mutating func cancel() {
         self.item?.cancel()

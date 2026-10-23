@@ -31,7 +31,7 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     internal var lastUse: UInt64
 
     /// The idle timer of the connection, pending while one is armed. The pool arms at most one per connection.
-    internal var idleItem: DispatchWorkItem? = nil
+    internal var idleTimer: ClientDeadlineTimer = ClientDeadlineTimer()
 
     /// Calls that the connection lost before an answer. Their outcome waits for the connection's next event: that
     /// event tells a loss that repeats (message size, unauthorized) from one that may be resent.

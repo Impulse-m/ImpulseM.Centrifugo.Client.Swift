@@ -364,6 +364,56 @@ final class RpcPoolTokenTests: @unchecked Sendable {
     }
 
 
+    @Test func spentTokenQueuesACallWhileAConnectionOfTheGenerationIsBusy() async throws {
+        let aData: Data = Data("A".utf8)
+        let bData: Data = Data("B".utf8)
+        // The first call holds the first connection, and the server never answers it.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "t-main"
+        let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(tokenFrom: true))
+        let first: TokenPoolOutcome = TokenPoolOutcome("first call")
+        let firstCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: aData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            first.record(result)
+        }
+        await fake.awaitArrivals("first rpc") { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+
+        // From now on the server refuses every new connect with 109: the second connection of the pool gets it, and the
+        // main client has no renewal, so the token is spent. The first connection is still connected and busy.
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasConnect else {
+                return nil
+            }
+            return rpcErrorReply(code: 109, message: "token expired", temporary: false)
+        }
+        let second: TokenPoolOutcome = TokenPoolOutcome("second call")
+        let secondCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: bData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            second.record(result)
+        }
+        await fake.awaitArrivals("second pool connect", count: 3, connectWithToken("t-main"))
+        await awaitSyncQueue(main.client)
+        // A busy live connection of the generation keeps the token usable: the call is queued, not refused.
+        #expect(second.error == nil, "a spent token with a busy live connection queues the call")
+
+        // The first call ends and frees its slot: the queued call is served on the first connection.
+        firstCall.cancel()
+        await fulfillment(of: first.done, within: 5)
+        #expect(kindOf(first.error) == "replyError 17")
+        await fake.awaitArrivals("second rpc sent") { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == bData
+        }
+        secondCall.cancel()
+        await fulfillment(of: second.done, within: 5)
+        #expect(kindOf(second.error) == "replyError 17")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
     @Test func confirmationWithAnotherUserRetiresTheConnection() async throws {
         var config: CentrifugeClientConfig = CentrifugeClientConfig()
         config.token = "t-main"

@@ -52,8 +52,8 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// Every call that is not settled yet, so that `close` settles them all.
     private var unsettled: [ObjectIdentifier: RpcPoolCall] = [:]
 
-    /// The calls whose later resend waits for its delay. They join their line when the delay ends. A plain array on
-    /// purpose: the waits count toward `maxQueued` (queuedCount), so the scans over them stay as short as the lines'.
+    /// The calls whose later resend waits for its delay. They join their line when the delay ends. They are not
+    /// counted toward `maxQueued` (queuedCount). A plain array on purpose: the scans over them stay short.
     private var resendWaits: [RpcPoolCall] = []
 
     /// The one timer of the waiting calls' deadlines, the ends of the holds and the ends of the later resend delays.
@@ -203,7 +203,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             // The call is bound to the identity generation of the main client now, and refused when no connection can
             // take it while the client's token is spent.
             call.generation = source.generation
-            if source.isSpent && liveConnection(endpoints) == nil {
+            if source.isSpent && !hasLiveConnection(endpoints) {
                 settle(call, .failure(CentrifugeError.clientRejected(code: 3, message: "token refused")))
                 return
             }
@@ -254,6 +254,19 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         let endpoint: RpcPoolEndpoint = RpcPoolEndpoint(url: url)
         endpointsByURL[url] = endpoint
         return endpoint
+    }
+
+
+    /// Whether a connected connection of the current generation exists, whatever its load (as Java's hasLive). A spent
+    /// token refuses a call only when no such connection can serve it later; a busy connection frees its slot.
+    private func hasLiveConnection(_ endpoints: [RpcPoolEndpoint]) -> Bool {
+        let current: UInt64 = currentGeneration()
+        for endpoint: RpcPoolEndpoint in endpoints {
+            for conn: RpcPoolConnection in endpoint.connections where conn.isConnected && conn.generation == current {
+                return true
+            }
+        }
+        return false
     }
 
 
@@ -354,7 +367,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         if call.generation != source.generation {
             return CentrifugeError.clientRejected(code: 3, message: "identity changed")
         }
-        if source.isSpent && liveConnection(endpoints) == nil {
+        if source.isSpent && !hasLiveConnection(endpoints) {
             return CentrifugeError.clientRejected(code: 3, message: "token refused")
         }
         return nil
@@ -752,8 +765,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             return
         }
         conn.closed = true
-        conn.idleItem?.cancel()
-        conn.idleItem = nil
+        conn.idleTimer.cancel()
         conn.endpoint.connections.removeAll { (candidate: RpcPoolConnection) -> Bool in
             return candidate === conn
         }
@@ -797,24 +809,17 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// Arms the idle timer of a connection, when it has none and the idle timeout is set. The timer runs at the end of
     /// the idle span counted from the connection's last use, and checks again when it fires.
     private func armIdle(_ conn: RpcPoolConnection) {
-        if closed || conn.closed || conn.idleItem != nil || options.idleTimeout <= 0 {
+        if closed || conn.closed || conn.idleTimer.isArmed || options.idleTimeout <= 0 {
             return
         }
-        let now: UInt64 = main.clock.monotonicNanos()
         let due: UInt64 = conn.lastUse + clientNanos(options.idleTimeout)
-        var span: UInt64 = 0
-        if due > now {
-            span = due - now
-        }
-        let item: DispatchWorkItem = DispatchWorkItem { [weak self, weak conn] () -> Void in
+        conn.idleTimer.rearm(at: due, on: main, lateGrace: false) { [weak self, weak conn] () -> Void in
             guard let owner: CentrifugeRpcPool = self, let connection: RpcPoolConnection = conn else {
                 return
             }
-            connection.idleItem = nil
+            connection.idleTimer.forget()
             owner.idleDue(connection)
         }
-        conn.idleItem = item
-        main.scheduleAfter(clientSeconds(nanos: span), item)
     }
 
 
@@ -880,8 +885,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// Closes one connection the pool chose to close (idle). It leaves its endpoint at once.
     private func closeConnection(_ conn: RpcPoolConnection) {
         conn.closed = true
-        conn.idleItem?.cancel()
-        conn.idleItem = nil
+        conn.idleTimer.cancel()
         conn.endpoint.connections.removeAll { (candidate: RpcPoolConnection) -> Bool in
             return candidate === conn
         }
@@ -997,8 +1001,10 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         for call: RpcPoolCall in fetches.calls {
             earliest = earlierNanos(earliest, call.deadline)
         }
-        waitTimer.rearm(at: earliest, on: main, lateGrace: true) { [weak self] () -> Void in
-            self?.waitTimerFired()
+        // The timer holds the pool strongly while a call waits, so a pool the app released still settles its waiting
+        // calls at their deadlines. The timer is cancelled when nothing waits, which ends the reference.
+        waitTimer.rearm(at: earliest, on: main, lateGrace: true) { () -> Void in
+            self.waitTimerFired()
         }
     }
 
@@ -1054,11 +1060,11 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     }
 
 
-    /// The calls that wait for a slot: the lines, and the later resends that wait for their delay. Both count
-    /// toward `maxQueued`, so a parked resend takes the room of a waiting call. The redirect fetches that wait for a
-    /// slot count too.
+    /// The calls that wait for a slot in a line, and the redirect fetches that wait for a slot. A later resend
+    /// that waits for its delay is not counted: `maxQueued` bounds fresh calls only (spec C 2.3), so a resend is
+    /// never refused by it.
     private func queuedCount() -> Int {
-        var total: Int = resendWaits.count + fetches.waitingCount
+        var total: Int = fetches.waitingCount
         for line: [RpcPoolCall] in lines.values {
             total += line.count
         }
@@ -1102,8 +1108,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
                 conn.closed = true
                 // The lost calls of the connection are settled below with the rest; the connection keeps no reference.
                 conn.lostCalls = []
-                conn.idleItem?.cancel()
-                conn.idleItem = nil
+                conn.idleTimer.cancel()
                 conn.client.disconnect()
             }
             endpoint.connections = []

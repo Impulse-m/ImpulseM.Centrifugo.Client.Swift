@@ -641,7 +641,8 @@ final class RpcPoolTests: @unchecked Sendable {
         }
         await fulfillment(of: waiting, within: 5)
 
-        // C takes the free slot, so B finds no slot, no opener, and the bound already full with A's resend wait.
+        // C takes the free slot, so B finds no slot and waits in the line. A's resend wait is not counted toward
+        // maxQueued (spec C 2.3), so B is queued, not refused with code 16.
         let second: PoolOutcome = PoolOutcome("call C")
         let secondCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: cData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
             second.record(result)
@@ -650,17 +651,57 @@ final class RpcPoolTests: @unchecked Sendable {
             return command.hasRpc && command.rpc.data == cData
         }
         let third: PoolOutcome = PoolOutcome("call B")
-        pool.rpc(endpointKey: "", method: "m", data: bData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+        let thirdCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: bData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
             third.record(result)
         }
-        await fulfillment(of: third.done, within: 5)
-        #expect(kindOf(third.error) == "replyError 16")
+        await awaitSyncQueue(main.client)
+        #expect(third.error == nil, "B is queued, not refused")
+        #expect(pool.stats().queued == 1, "only the line counts toward maxQueued")
 
+        // C ends and frees the slot: B is sent from the line, before A's resend wait ends.
         secondCall.cancel()
+        await fulfillment(of: second.done, within: 5)
+        await fake.awaitArrivals("B sent", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == bData
+        }
+
+        thirdCall.cancel()
         firstCall.cancel()
-        await fulfillment(of: [first.done, second.done], within: 5)
+        await fulfillment(of: [first.done, second.done, third.done], within: 5)
         #expect(kindOf(first.error) == "replyError 17")
         #expect(kindOf(second.error) == "replyError 17")
+        #expect(kindOf(third.error) == "replyError 17")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    /// A pool released while a call waits in its line still settles the call: the wait timer keeps the pool until the
+    /// call's deadline, and the deadline fails the call with `timeout` (spec F15).
+    @Test func releasedPoolStillSettlesItsWaitingCalls() async throws {
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc
+        }
+        let main: MainHarness = await connectedMain(random: ManualRandom(draw: 0))
+        var pool: CentrifugeRpcPool? = CentrifugeRpcPool(main: main.client, options: poolOptions(maxConnectionsPerEndpoint: 1))
+        // The first call holds the one connection and is never answered.
+        let first: PoolOutcome = PoolOutcome("first call")
+        _ = pool?.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            first.record(result)
+        }
+        await fake.awaitArrivals("first rpc") { (command: RpcCommand) -> Bool in
+            return command.hasRpc
+        }
+        // The second call waits in the line for the slot.
+        let second: PoolOutcome = PoolOutcome("waiting call")
+        _ = pool?.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            second.record(result)
+        }
+        await awaitSyncQueue(main.client)
+        // The app drops its last reference to the pool while the call waits.
+        pool = nil
+        await main.scheduler.advance(by: 30)
+        await fulfillment(of: second.done, within: 5)
+        #expect(kindOf(second.error) == "timeout", "a released pool still settles its waiting call")
         withExtendedLifetime(main.delegate) {}
     }
 
