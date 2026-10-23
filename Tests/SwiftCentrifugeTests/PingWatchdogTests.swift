@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-// The ping watchdog (table T6): one timer per connection, which re-arms itself from the replies the
+// The ping watchdog: one timer per connection, which re-arms itself from the replies the
 // client has decoded. The time is the ManualClock of ManualScheduler.swift and moves only when a test
 // advances it. Every push the test depends on is awaited before the advance, so no test sleeps.
 //
@@ -146,7 +146,7 @@ final class PingWatchdogTests: @unchecked Sendable {
 
     /// A thousand reply batches arm no timer: the watchdog's one timer is the only one, armed at connect.
     /// This counts the scheduler calls made while the batches arrive. It is the zero-timer assertion of the
-    /// F11 benchmark, not a rate or allocation measurement.
+    /// benchmark, not a rate or allocation measurement.
     @Test func replyBatchesCreateNoTimer() async {
         let connection: WatchdogConnection = await connectedClient(pong: false)
         let setup: ManualClientSetup = connection.setup

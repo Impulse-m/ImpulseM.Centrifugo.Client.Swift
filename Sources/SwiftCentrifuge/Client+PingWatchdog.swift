@@ -1,6 +1,6 @@
 import Foundation
 
-// The ping watchdog of the connection (F11). Client.swift arms it at connect (startWaitPing) and
+// The ping watchdog of the connection. Client.swift arms it at connect (startWaitPing) and
 // records the clock time of every reply in lastReplyNanos. The timer and its re-arming live here.
 // Everything runs on syncQueue.
 

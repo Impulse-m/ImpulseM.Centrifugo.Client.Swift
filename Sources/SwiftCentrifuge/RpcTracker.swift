@@ -463,12 +463,7 @@ internal final class RpcTracker {
             // The range of the draw is capped at the remaining deadline, not the drawn value, so the
             // resend is never due after it. The draw is uniform over the capped range.
             let remaining: UInt64 = call.deadline - now
-            let delay: UInt64 = fullJitterNanos(
-                base: laterResendBaseNanos,
-                attempt: call.laterResends,
-                cap: remaining,
-                random: client.random
-            )
+            let delay: UInt64 = laterResendDelayNanos(attempt: call.laterResends, remaining: remaining, random: client.random)
             call.laterResends += 1
             call.phase = .resendWait
             call.commandId = 0

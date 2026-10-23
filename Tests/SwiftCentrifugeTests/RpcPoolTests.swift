@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftCentrifuge
 
-// The rpc pool of this slice: the admission order, the line bound, the idle close on the fake clock, close, and a
+// The rpc pool: the admission order, the line bound, the idle close on the fake clock, close, and a
 // delegate callback that calls the pool's stats and close. Connections go to the in-process fake server; the idle
 // timer runs on the main client's ManualScheduler, so no test sleeps.
 

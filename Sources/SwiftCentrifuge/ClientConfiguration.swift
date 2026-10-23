@@ -18,3 +18,23 @@ internal func clientConfigurationError(_ config: CentrifugeClientConfig) -> Cent
     }
     return nil
 }
+
+
+public extension CentrifugeClient {
+    /// Creates a client, and refuses a configuration that cannot work. Unlike `init`, which
+    /// still returns a client for such a configuration (and reports it through `onError` at
+    /// `connect()`), this throws it at once.
+    ///
+    /// - Throws: `CentrifugeError.configurationError` when `config.instance` is not valid, or
+    ///   `config.maxPendingRpc` is below 1.
+    static func create(
+        endpoint: String,
+        config: CentrifugeClientConfig,
+        delegate: CentrifugeClientDelegate? = nil
+    ) throws -> CentrifugeClient {
+        if let error: CentrifugeError = clientConfigurationError(config) {
+            throw error
+        }
+        return CentrifugeClient(endpoint: endpoint, config: config, delegate: delegate)
+    }
+}

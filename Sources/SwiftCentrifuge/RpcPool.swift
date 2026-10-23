@@ -32,8 +32,9 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// The redirect fetches of the pool: their slots, their line and their session.
     private let fetches: RpcPoolFetches
 
-    /// The token source of the main client, with a pool that takes its token from it (`tokenFrom`). Nil otherwise.
-    private let tokenSource: RpcPoolTokenSource?
+    /// The token source of the main client, with a pool that takes its token from it (`tokenFrom`). Nil otherwise. Set on
+    /// the main client's queue, a moment after the pool is made, before any call of the pool is admitted.
+    private var tokenSource: RpcPoolTokenSource? = nil
 
     /// Guards `statsSnapshot`, which the queue writes and any thread reads.
     private let statsLock: NSLock = NSLock()
@@ -86,11 +87,17 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         settings.tokenGetter = options.tokenGetter
         self.connectionConfig = settings
         if options.tokenFrom {
-            self.tokenSource = RpcPoolTokenSource.forClient(main)
-        } else {
-            self.tokenSource = nil
+            // The source is made, stored on the main client and told of this pool on the main client's queue: the client
+            // reads the stored source there, so no thread other than the queue touches it.
+            main.syncQueue.async { [weak self] () -> Void in
+                let source: RpcPoolTokenSource = RpcPoolTokenSource.forClient(main)
+                guard let pool: CentrifugeRpcPool = self else {
+                    return
+                }
+                pool.tokenSource = source
+                source.addListener(pool)
+            }
         }
-        self.tokenSource?.addListener(self)
     }
 
 
@@ -513,7 +520,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
 
 
     /// A server error reply. Either resend needs a resend left and a deadline still ahead, and only then does the
-    /// reroute hook see the reply. A move wins over the later signal (R4.1). Otherwise the error settles unchanged.
+    /// reroute hook see the reply. A move wins over the later signal. Otherwise the error settles unchanged.
     private func serverErrorAnswered(_ call: RpcPoolCall, reply: CentrifugeReplyError, error: Error) {
         let now: UInt64 = main.clock.monotonicNanos()
         if call.resends >= options.retries || call.deadline <= now {
@@ -608,12 +615,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// number of later resends the call has made so far. The caller has checked that the deadline is still ahead.
     private func waitForLaterResend(_ call: RpcPoolCall, now: UInt64) {
         let remaining: UInt64 = call.deadline - now
-        let delay: UInt64 = fullJitterNanos(
-            base: laterResendBaseNanos,
-            attempt: call.laterResends,
-            cap: remaining,
-            random: main.random
-        )
+        let delay: UInt64 = laterResendDelayNanos(attempt: call.laterResends, remaining: remaining, random: main.random)
         call.laterResends += 1
         call.resends += 1
         call.connection = nil
@@ -703,7 +705,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             return
         }
         if conn.generation != currentGeneration() {
-            // The identity moved on while it connected: the connection retires at this event (R5.2).
+            // The identity moved on while it connected: the connection retires at this event.
             closeConnection(conn)
             drainAll()
             publishStats()
@@ -744,7 +746,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
 
     /// The connection of an endpoint ended for good. It leaves its endpoint. A close for message size holds nothing
     /// back. Any other end holds the endpoint for a backoff. The calls it lost settle with `connectionClosed` on a
-    /// message-size close or an unauthorized close, and are resent on any other end while `retries` allow (R5.1).
+    /// message-size close or an unauthorized close, and are resent on any other end while `retries` allow.
     internal func connectionDisconnected(_ conn: RpcPoolConnection, code: UInt32) {
         if closed || conn.closed {
             return
@@ -758,7 +760,10 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         let lost: [RpcPoolCall] = conn.lostCalls
         conn.lostCalls = []
         let repeatsLoss: Bool = code == disconnectCodeMessageSizeLimit || code == disconnectedCodeUnauthorized
-        if code != disconnectCodeMessageSizeLimit {
+        // A connection of an identity the client has left, refused its token, retires silently: it counts no failure and
+        // holds no endpoint, so a call of the new identity opens at once (as Java does).
+        let retiredSilently: Bool = code == disconnectedCodeUnauthorized && conn.generation != currentGeneration()
+        if code != disconnectCodeMessageSizeLimit && !retiredSilently {
             conn.endpoint.failures += 1
             holdEndpoint(conn.endpoint)
         }

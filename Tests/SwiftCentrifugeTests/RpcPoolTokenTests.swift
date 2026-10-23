@@ -94,6 +94,13 @@ private struct TokenMain {
 }
 
 
+/// The token source of a main client and the token state of one of its connections, made on the client's queue.
+private struct TokenPair {
+    let source: RpcPoolTokenSource
+    let owner: RpcPoolConnectionToken
+}
+
+
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class RpcPoolTokenTests: @unchecked Sendable {
     private let fake: FakeRpcServer
@@ -205,6 +212,19 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         withExtendedLifetime(delegate) {}
         withExtendedLifetime(pool) {}
         return remaining
+    }
+
+
+    /// Makes the token source of a main client and one token state of a connection on the client's queue, the thread
+    /// the source is made on, and returns once that block has run.
+    private func tokenPair(_ client: CentrifugeClient) async throws -> TokenPair {
+        let made: LockedBox<TokenPair?> = LockedBox(nil)
+        client.syncQueue.async {
+            let source: RpcPoolTokenSource = RpcPoolTokenSource.forClient(client)
+            made.set(TokenPair(source: source, owner: RpcPoolConnectionToken(source: source)))
+        }
+        await awaitSyncQueue(client)
+        return try #require(made.current)
     }
 
 
@@ -370,6 +390,9 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         await fulfillment(of: outcome.done, within: 5)
         // The connection retired and its token is unusable: the call that waited for a connection fails with token refused.
         #expect(kindOf(outcome.error) == "clientRejected 3 token refused")
+        // The retirement itself: the pool holds no connection once the call has failed.
+        await awaitSyncQueue(main.client)
+        #expect(pool.stats().connections == 0)
         withExtendedLifetime(main.delegate) {}
     }
 
@@ -378,10 +401,10 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         var config: CentrifugeClientConfig = CentrifugeClientConfig()
         config.token = "t-main"
         let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
-        let source: RpcPoolTokenSource = RpcPoolTokenSource.forClient(main.client)
-        let owner: RpcPoolConnectionToken = RpcPoolConnectionToken(source: source)
-        // The source is seeded on the queue: the sync point makes the confirmed token visible to the request below.
-        await awaitSyncQueue(main.client)
+        // The source is made on the queue, and seeded there: the sync point makes the confirmed token visible to the request below.
+        let pair: TokenPair = try await tokenPair(main.client)
+        let source: RpcPoolTokenSource = pair.source
+        let owner: RpcPoolConnectionToken = pair.owner
 
         // The connection takes its first token at generation 0, and stamps itself with it.
         let first: TokenAnswer = TokenAnswer("first token")
@@ -408,5 +431,116 @@ final class RpcPoolTokenTests: @unchecked Sendable {
         #expect(kindOf(second.error) == "unauthorized")
         #expect(owner.generation == 0)
         withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func poolsMadeWhileTheMainClientRunsServeTheirCalls() async throws {
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "t-main"
+        let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
+        // Two pools made one after the other on this thread, while the main client is connected. Each stores its source on
+        // the main client's queue, so the client reads one source, and a call of the second pool is served.
+        let first: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(tokenFrom: true))
+        let second: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(tokenFrom: true))
+        let outcome: TokenPoolOutcome = TokenPoolOutcome("call on the second pool")
+        second.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "none")
+        await awaitSyncQueue(main.client)
+        #expect(main.client.poolTokenSource != nil)
+        withExtendedLifetime(first) {}
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func renewalThatGivesBackTheRefusedTokenSpendsIt() async throws {
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.tokenGetter = { (_: CentrifugeConnectionTokenEvent, completion: @escaping (Result<String, Error>) -> Void) -> Void in
+            completion(.success("t-main"))
+        }
+        let main: TokenMain = await connectedMain(server: fake.server.url, config: config)
+
+        // From now on the server refuses every connect and every refresh with 109. The getter gives back the refused token, so
+        // the renewal is refused too, and the token is spent: the waiting call fails instead of waiting for its deadline.
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasConnect || command.hasRefresh else {
+                return nil
+            }
+            return rpcErrorReply(code: 109, message: "token expired", temporary: false)
+        }
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(tokenFrom: true))
+        let outcome: TokenPoolOutcome = TokenPoolOutcome("call with a renewal that gives the token back")
+        pool.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: outcome.done, within: 10)
+        #expect(kindOf(outcome.error) == "clientRejected 3 token refused")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func generationMovedWhileWaitingRetiresTheConnection() async throws {
+        let mainServer: FakeCentrifugoServer = FakeCentrifugoServer()
+        try mainServer.start()
+        defer {
+            mainServer.stop()
+        }
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        config.token = "t-main"
+        let connected: Expectation = Expectation("main connected")
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        delegate.onConn = { () -> Void in
+            connected.fulfill()
+        }
+        let setup: ManualClientSetup = makeManualClient(endpoint: mainServer.url, config: config, delegate: delegate)
+        setup.client.connect()
+        await fulfillment(of: connected, within: 5)
+        let reconnecting: Expectation = Expectation("main reconnecting")
+        delegate.onConnectingEvent = { (_: CentrifugeConnectingEvent) -> Void in
+            reconnecting.fulfill()
+        }
+        let pair: TokenPair = try await tokenPair(setup.client)
+        let source: RpcPoolTokenSource = pair.source
+        let owner: RpcPoolConnectionToken = pair.owner
+
+        // The connection is stamped at generation 0. A second lend does not re-stamp it.
+        setup.client.syncQueue.async {
+            owner.lend("t-old", generation: 0)
+            owner.lend("t-newer", generation: 7)
+        }
+        await awaitSyncQueue(setup.client)
+        #expect(owner.stamped)
+        #expect(owner.generation == 0)
+
+        // The session is invalidated and the reconnect waits on the manual scheduler, so the main client is connecting and a
+        // token request waits for it.
+        mainServer.disconnect(3014, "state invalidated")
+        await fulfillment(of: reconnecting, within: 5)
+        await awaitSyncQueue(setup.client)
+        let answer: TokenAnswer = TokenAnswer("token waiting across a generation change")
+        setup.client.syncQueue.async {
+            source.request(owner: owner) { (result: Result<String, Error>) -> Void in
+                answer.record(result)
+            }
+        }
+        await awaitSyncQueue(setup.client)
+
+        // While the request waits, another user is confirmed: the generation moves on, and the request keeps waiting.
+        setup.client.syncQueue.async {
+            setup.client.identity.applyConnect(user: "u2", authClass: "")
+            source.connectConfirmed()
+        }
+        await awaitSyncQueue(setup.client)
+        #expect(owner.generation == 0)
+
+        // The reconnect confirms a token. The token is delivered across the generation change, so the connection is retired
+        // with unauthorized, and it keeps its generation.
+        await setup.scheduler.advance(by: 30)
+        await fulfillment(of: answer.done, within: 5)
+        #expect(kindOf(answer.error) == "unauthorized")
+        #expect(owner.generation == 0)
+        withExtendedLifetime(delegate) {}
     }
 }

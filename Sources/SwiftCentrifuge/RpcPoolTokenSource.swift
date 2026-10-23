@@ -140,6 +140,7 @@ internal final class RpcPoolTokenSource {
 
     /// The source of a main client. The first pool that takes its token from the client makes it, and the client keeps it.
     /// A client that is already connected when the source is made is seeded on the queue, before the pool's first call.
+    /// Runs on the main client's queue only: it reads and stores `main.poolTokenSource`, which the client reads there.
     internal static func forClient(_ main: CentrifugeClient) -> RpcPoolTokenSource {
         if let existing: RpcPoolTokenSource = main.poolTokenSource {
             return existing
@@ -339,8 +340,9 @@ internal final class RpcPoolTokenSource {
     }
 
 
-    /// A renewal of the main client ended. An accepted one was handled by `refreshAccepted`. A refusal with 103, or a
-    /// renewal that cannot run, spends the token that was renewed. Any other failure leaves the requests waiting for the next
+    /// A renewal of the main client ended. An accepted one was handled by `refreshAccepted`. A server refusal that the
+    /// renewal cannot repair (a non-temporary error, 103, or 109, which gives back the refused token again), or a renewal
+    /// that cannot run, spends the token that was renewed. Any other failure leaves the requests waiting for the next
     /// event of the main client.
     private func renewalFinished(token: String, result: Result<CentrifugeRefreshResult, Error>) {
         guard case .failure(let error) = result else {
@@ -349,8 +351,8 @@ internal final class RpcPoolTokenSource {
         var spends: Bool = false
         if let known: CentrifugeError = error as? CentrifugeError {
             switch known {
-            case .replyError(let code, _, _):
-                spends = code == 103
+            case .replyError(let code, _, let temporary):
+                spends = !temporary || code == 103 || code == 109
             case .configurationError:
                 spends = true
             default:

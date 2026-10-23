@@ -39,9 +39,16 @@ internal let maxLaterResends: Int = 3
 /// Base of the later-resend delay in nanoseconds: 250 ms, doubled for each later resend so far.
 internal let laterResendBaseNanos: UInt64 = 250_000_000
 
+/// The delay of a later resend in nanoseconds: uniform over `0 ... min(250 ms * 2^attempt, remaining)`, drawn from the
+/// injected source. `attempt` is the number of later resends the call has made so far; the caller counts the new one.
+/// `remaining` is the time to the call's deadline, so the resend is never due after it.
+internal func laterResendDelayNanos(attempt: Int, remaining: UInt64, random: ClientRandom) -> UInt64 {
+    return fullJitterNanos(base: laterResendBaseNanos, attempt: attempt, cap: remaining, random: random)
+}
+
 /// A call with headers on a connection that did not confirm the RPC options, so the headers cannot be
 /// carried. Client-local: the server never sends it, but it travels as a `replyError` code, as the
-/// contract documents.
+/// protocol documents for it.
 internal let rpcCodeUnsupported: UInt32 = 15
 
 /// A call refused by the client's bound on tracked calls, or a resend beyond its limit.

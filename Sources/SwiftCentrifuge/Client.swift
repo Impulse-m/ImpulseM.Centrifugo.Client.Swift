@@ -29,9 +29,9 @@ public enum CentrifugeError: Error {
     case replyErrorDetails(CentrifugeReplyError)
     /// The connection was lost while the call was on it, and the call cannot be resent on the next one.
     case connectionClosed
-    /// Reserved (code 10). A call gets it only when its request fails to encode, which no protobuf request
-    /// of the client can do, and the transport gives no write error signal, so no call gets it today. It
-    /// stays for the shape of the API.
+    /// Code 10. A call settles with it when its transmit throws, which is an encode failure of its request.
+    /// No protobuf request of the client fails to encode today, and the transport gives no write error signal,
+    /// so in practice no call gets it. It stays for the shape of the API.
     case transportWriteError(error: Error)
     /// The client refused the call itself, with a text that is not a server reply. Reserved for the
     /// rpc pool, and never a server reply code.
@@ -330,7 +330,7 @@ public class CentrifugeClient: @unchecked Sendable {
     internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
     internal var sendPong: Bool = false
-    // The ping watchdog (F11): the clock time of the last decoded batch that carried a reply.
+    // The ping watchdog: the clock time of the last decoded batch that carried a reply.
     internal var lastReplyNanos: UInt64 = 0
     // The publish debounce windows of the subscriptions and their one timer (PublishDebounce.swift).
     internal var publishDebounce: PublishDebounceState = PublishDebounceState()
@@ -355,17 +355,6 @@ public class CentrifugeClient: @unchecked Sendable {
     ///   - config: config object.
     ///   - delegate: delegate protocol implementation to react on client events.
     public init(endpoint: String, config: CentrifugeClientConfig, delegate: CentrifugeClientDelegate? = nil) {
-        self.url = endpoint
-        self.config = config
-        self.delegate = delegate
-        self.log = config.logger ?? EmptyLogger.instance
-        
-        self.token = config.token;
-        
-        if config.data != nil {
-            self.data = config.data;
-        }
-        
         let clock: ClientClock = SystemClientClock()
         let setup: ClientSetup = CentrifugeClient.makeSetup(endpoint: endpoint, config: config, clock: clock) { queue, queueClock in
             return DispatchClientScheduler(queue: queue, clock: queueClock)
