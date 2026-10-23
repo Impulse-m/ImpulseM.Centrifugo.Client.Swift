@@ -323,7 +323,7 @@ public class CentrifugeClient: @unchecked Sendable {
     // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
     internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
-    fileprivate var sendPong: Bool = false
+    internal var sendPong: Bool = false
     // The ping watchdog (F11): the clock time of the last decoded batch that carried a reply.
     internal var lastReplyNanos: UInt64 = 0
     // The publish debounce windows of the subscriptions and their one timer (PublishDebounce.swift).
@@ -845,6 +845,21 @@ internal extension CentrifugeClient {
         let data = try CentrifugeSerializer.serializeCommands(commands: commands)
         self.conn?.write(data: data)
     }
+
+    /// Writes one command and calls back with its reply. Internal for the token exchange flow (TokenExchangeFlow.swift),
+    /// which writes its rpc command with it. Upstream's sendCommand is fileprivate, so the moved body lives here.
+    func sendCommand(command: Centrifugal_Centrifuge_Protocol_Command, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
+        let strongSelf = self
+        let commands: [Centrifugal_Centrifuge_Protocol_Command] = [command]
+        do {
+            let data = try CentrifugeSerializer.serializeCommands(commands: commands)
+            strongSelf.conn?.write(data: data)
+            strongSelf.waitForReply(id: command.id, completion: completion)
+        } catch {
+            completion(nil, error)
+            return
+        }
+    }
 }
 
 fileprivate extension CentrifugeClient {
@@ -1107,20 +1122,6 @@ fileprivate extension CentrifugeClient {
     }
     
     
-    private func sendCommand(command: Centrifugal_Centrifuge_Protocol_Command, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
-        let strongSelf = self
-        let commands: [Centrifugal_Centrifuge_Protocol_Command] = [command]
-        do {
-            let data = try CentrifugeSerializer.serializeCommands(commands: commands)
-            strongSelf.conn?.write(data: data)
-            strongSelf.waitForReply(id: command.id, completion: completion)
-        } catch {
-            completion(nil, error)
-            return
-        }
-    }
-    
-    
     private func waitForReply(id: UInt32, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
         let timeoutTask = DispatchWorkItem { [weak self] in
             guard let strongSelf = self else { return }
@@ -1287,7 +1288,8 @@ fileprivate extension CentrifugeClient {
     }
     
     private func handlePing() {
-        guard self.state == .connected else { return }
+        // A bootstrap holds the connection in the connecting state, and the server pings it too.
+        guard self.state == .connected || self.tokenExchangeState.bootstrap != nil else { return }
         if self.sendPong {
             try? self.sendCommandAsync(command: Centrifugal_Centrifuge_Protocol_Command())
         }
@@ -1300,6 +1302,7 @@ fileprivate extension CentrifugeClient {
     }
 
     private func handlePush(push: Centrifugal_Centrifuge_Protocol_Push) {
+        if self.holdTokenExchangePush(push) { return }
         let channel = push.channel
         // Channel compaction: pub/join/leave pushes may carry a numeric channel ID
         // instead of the channel name. Other push types always carry the channel.
@@ -1617,6 +1620,15 @@ internal extension CentrifugeClient {
 }
 
 
+// The token exchange flow (TokenExchangeFlow.swift) resumes a connect through this: handleConnectResult is in a fileprivate
+// extension, and a member of one cannot be made internal.
+internal extension CentrifugeClient {
+    func resumeConnect(_ result: Centrifugal_Centrifuge_Protocol_ConnectResult) {
+        self.handleConnectResult(res: result, error: nil, token: nil)
+    }
+}
+
+
 // The refresh command is sent from Refresh.swift, so it is internal (the extension is not fileprivate).
 internal extension CentrifugeClient {
     func sendRefresh(token: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_RefreshResult?, Error?)->()) {
@@ -1640,19 +1652,6 @@ internal extension CentrifugeClient {
                 completion(rep.refresh, nil)
             }
         })
-    }
-}
-
-
-// The token exchange flow (TokenExchangeFlow.swift) reaches the connect reply and the command writer through these two,
-// because the members they wrap are private to this file.
-internal extension CentrifugeClient {
-    func resumeConnect(_ result: Centrifugal_Centrifuge_Protocol_ConnectResult) {
-        self.handleConnectResult(res: result, error: nil, token: nil)
-    }
-
-    func sendPlainCommand(command: Centrifugal_Centrifuge_Protocol_Command, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
-        self.sendCommand(command: command, completion: completion)
     }
 }
 

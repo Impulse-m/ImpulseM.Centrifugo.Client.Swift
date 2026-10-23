@@ -24,6 +24,10 @@ internal struct TokenExchangeBootstrap {
     // Set when the access token was put on the client for the refresh command. It is cleared again when the bootstrap
     // ends without the command being accepted.
     internal var tokenSet: Bool = false
+    // The subscribe pushes that arrived during the bootstrap, by channel. The connect resumes with them merged in.
+    internal var heldSubscribes: [String: Centrifugal_Centrifuge_Protocol_Subscribe] = [:]
+    // The channels whose unsubscribe push arrived during the bootstrap. The connect resumes without them.
+    internal var heldUnsubscribes: Set<String> = []
 }
 
 

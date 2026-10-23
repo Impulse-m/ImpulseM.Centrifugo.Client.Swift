@@ -139,6 +139,26 @@ internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: C
 }
 
 
+/// A backoff delay in nanoseconds, the shape of the Java SDK's Backoff: min(ceiling, minimum + jitter), where the
+/// jitter is a full-jitter draw over `0 ... min(ceiling, minimum * 2^attempt)` from the injected source.
+internal func boundedBackoffNanos(
+    minimumNanos: UInt64,
+    ceilingNanos: UInt64,
+    attempt: Int,
+    random: ClientRandom
+) -> UInt64 {
+    let jitter: UInt64 = fullJitterNanos(base: minimumNanos, attempt: attempt, cap: ceilingNanos, random: random)
+    return min(ceilingNanos, minimumNanos + jitter)
+}
+
+
+/// A uniform fraction in [0, 1] from the injected source: a count out of one billion steps, divided by it.
+internal func uniformFraction(_ random: ClientRandom) -> Double {
+    let steps: UInt64 = 1_000_000_000
+    return Double(random.uniform(0 ... steps - 1)) / Double(steps)
+}
+
+
 /// A client's timer for the earliest of the moments that wait for it: the tracker's deadlines, the window
 /// ends of the publish debounce. The timer is re-armed only when that moment changes, so a client holds one
 /// of these per use and never one per call or subscription.

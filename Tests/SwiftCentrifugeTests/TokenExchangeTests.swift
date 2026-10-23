@@ -182,11 +182,114 @@ private func isConfigurationError(_ error: Error) -> Bool {
 }
 
 
+/// The reply of a refresh command the server accepts without an expiry, or nil for any other command.
+private func refreshAnswer(_ command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? {
+    guard command.hasRefresh else {
+        return nil
+    }
+    var reply: Centrifugal_Centrifuge_Protocol_Reply = Centrifugal_Centrifuge_Protocol_Reply()
+    reply.id = command.id
+    reply.refresh = Centrifugal_Centrifuge_Protocol_RefreshResult()
+    return reply
+}
+
+
+/// The fake server's answers for an exchange that pushes the given pushes before its rpc reply, as a server does when a
+/// subscription is made while the connection bootstraps. The refresh command is accepted without an expiry.
+private func exchangeServerPushesBeforeReply(
+    server: FakeCentrifugoServer,
+    pushes: [FakeCentrifugoServer.PPush]
+) {
+    server.onCommand = { [weak server] (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+        if command.hasRpc {
+            for push: FakeCentrifugoServer.PPush in pushes {
+                server?.sendPush(push)
+            }
+            var rpcResult: Centrifugal_Centrifuge_Protocol_RPCResult = Centrifugal_Centrifuge_Protocol_RPCResult()
+            rpcResult.data = Data("access-1|refresh-2".utf8)
+            var reply: Centrifugal_Centrifuge_Protocol_Reply = Centrifugal_Centrifuge_Protocol_Reply()
+            reply.id = command.id
+            reply.rpc = rpcResult
+            return reply
+        }
+        return refreshAnswer(command)
+    }
+}
+
+
+/// A push that subscribes the channel on the server side.
+private func subscribePush(_ channel: String) -> FakeCentrifugoServer.PPush {
+    var push: FakeCentrifugoServer.PPush = FakeCentrifugoServer.PPush()
+    push.channel = channel
+    push.subscribe = Centrifugal_Centrifuge_Protocol_Subscribe()
+    return push
+}
+
+
+/// A push that removes the channel's server-side subscription.
+private func unsubscribePush(_ channel: String) -> FakeCentrifugoServer.PPush {
+    var unsubscribe: Centrifugal_Centrifuge_Protocol_Unsubscribe = Centrifugal_Centrifuge_Protocol_Unsubscribe()
+    unsubscribe.code = 0
+    unsubscribe.reason = "gone"
+    var push: FakeCentrifugoServer.PPush = FakeCentrifugoServer.PPush()
+    push.channel = channel
+    push.unsubscribe = unsubscribe
+    return push
+}
+
+
+/// "ok" or "error", the outcome of a refresh() call.
+private func outcomeLabel(_ result: Result<CentrifugeRefreshResult, Error>) -> String {
+    switch result {
+    case .success:
+        return "ok"
+    case .failure:
+        return "error"
+    }
+}
+
+
+/// Records the order of the callbacks the subscribe tests check, and counts the connects.
+private final class OrderDelegate: CentrifugeClientDelegate, @unchecked Sendable {
+    private let order: LockedBox<[String]>
+    private let connected: EventCounter
+
+
+    init(order: LockedBox<[String]>, connected: EventCounter) {
+        self.order = order
+        self.connected = connected
+    }
+
+
+    func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
+        order.update { (values: inout [String]) in
+            values.append("connected")
+        }
+        connected.record()
+    }
+
+
+    func onSubscribed(_ client: CentrifugeClient, _ event: CentrifugeServerSubscribedEvent) {
+        order.update { (values: inout [String]) in
+            values.append("subscribed:" + event.channel)
+        }
+    }
+
+
+    func onUnsubscribed(_ client: CentrifugeClient, _ event: CentrifugeServerUnsubscribedEvent) {
+        order.update { (values: inout [String]) in
+            values.append("unsubscribed:" + event.channel)
+        }
+    }
+}
+
+
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class TokenExchangeTests: @unchecked Sendable {
     private let server: FakeCentrifugoServer
     // A client holds its delegate weakly, so the test keeps every delegate it makes until it ends.
     private var delegates: [ClosureClientDelegate] = []
+    private var orderDelegates: [OrderDelegate] = []
 
 
     init() throws {
@@ -376,5 +479,139 @@ final class TokenExchangeTests: @unchecked Sendable {
             return
         }
         #expect(isConfigurationError(error))
+    }
+
+
+    @Test
+    func pingDuringBootstrapIsAnsweredWithAPong() async throws {
+        server.connectResult.pong = true
+        let pongs: EventCounter = EventCounter()
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            // A command with id 0 is the pong: the client answers each server ping with one.
+            if command.id == 0 {
+                pongs.record()
+                return nil
+            }
+            return refreshAnswer(command)
+        }
+        let held: LockedBox<((Result<CentrifugeTokenExchangeResult, Error>) -> Void)?> = LockedBox(nil)
+        let started: EventCounter = EventCounter()
+        let exchange: TestTokenExchange = TestTokenExchange(
+            stored: "refresh-1",
+            events: LockedBox([]),
+            answer: { (_: CentrifugeTokenExchangeEvent, completion: @escaping (Result<CentrifugeTokenExchangeResult, Error>) -> Void) in
+                // The exchange stalls until the test completes it, so the ping arrives during the bootstrap.
+                held.set(completion)
+                started.record()
+            }
+        )
+        let connected: Expectation = Expectation("connected")
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        delegate.onConn = {
+            connected.fulfill()
+        }
+        delegates.append(delegate)
+        let client: CentrifugeClient = CentrifugeClient(endpoint: server.url, config: tokenExchangeConfig(exchange), delegate: delegate)
+
+        client.connect()
+
+        await started.awaitCount(times: 1)
+        server.sendReply(FakeCentrifugoServer.PReply())
+        await pongs.awaitCount(times: 1)
+        held.current?(.success(CentrifugeTokenExchangeResult(token: "access-1", refreshToken: nil)))
+        await fulfillment(of: [connected], within: 5)
+        #expect(client.state == .connected)
+    }
+
+
+    @Test
+    func subscribePushDuringBootstrapIsMergedIntoConnect() async throws {
+        let order: LockedBox<[String]> = LockedBox([])
+        let connected: EventCounter = EventCounter()
+        exchangeServerPushesBeforeReply(server: server, pushes: [subscribePush("news")])
+        let delegate: OrderDelegate = OrderDelegate(order: order, connected: connected)
+        orderDelegates.append(delegate)
+        let exchange: TestTokenExchange = TestTokenExchange(stored: "refresh-1", events: LockedBox([]), answer: rpcAnswer())
+        let client: CentrifugeClient = CentrifugeClient(endpoint: server.url, config: tokenExchangeConfig(exchange), delegate: delegate)
+
+        client.connect()
+
+        await connected.awaitCount(times: 1)
+        // The subscribed event follows the connected event on the same queue block: a sync point before the check.
+        await awaitSyncQueue(client)
+        #expect(order.current == ["connected", "subscribed:news"])
+    }
+
+
+    @Test
+    func unsubscribePushDuringBootstrapLeavesNoEvent() async throws {
+        let order: LockedBox<[String]> = LockedBox([])
+        let connected: EventCounter = EventCounter()
+        exchangeServerPushesBeforeReply(server: server, pushes: [subscribePush("news"), unsubscribePush("news")])
+        let delegate: OrderDelegate = OrderDelegate(order: order, connected: connected)
+        orderDelegates.append(delegate)
+        let exchange: TestTokenExchange = TestTokenExchange(stored: "refresh-1", events: LockedBox([]), answer: rpcAnswer())
+        let client: CentrifugeClient = CentrifugeClient(endpoint: server.url, config: tokenExchangeConfig(exchange), delegate: delegate)
+
+        client.connect()
+
+        await connected.awaitCount(times: 1)
+        await awaitSyncQueue(client)
+        #expect(order.current == ["connected"])
+    }
+
+
+    @Test
+    func explicitRefreshIsNotFailedByALaterRefreshWithToken() async throws {
+        exchangeServerAnswers(server: server, exchangeData: "access-1|refresh-2", refreshExpires: false, ttl: 0, timeline: nil)
+        let calls: LockedBox<Int> = LockedBox(0)
+        let held: LockedBox<((Result<CentrifugeTokenExchangeResult, Error>) -> Void)?> = LockedBox(nil)
+        let stalled: EventCounter = EventCounter()
+        let immediate: ExchangeAnswer = rpcAnswer()
+        let exchange: TestTokenExchange = TestTokenExchange(
+            stored: "refresh-1",
+            events: LockedBox([]),
+            answer: { (event: CentrifugeTokenExchangeEvent, completion: @escaping (Result<CentrifugeTokenExchangeResult, Error>) -> Void) in
+                // The bootstrap exchange completes at once. The exchange of refresh() stalls until the test completes it.
+                let number: Int = calls.current
+                calls.set(number + 1)
+                if number == 0 {
+                    immediate(event, completion)
+                    return
+                }
+                held.set(completion)
+                stalled.record()
+            }
+        )
+        let connected: Expectation = Expectation("connected")
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        delegate.onConn = {
+            connected.fulfill()
+        }
+        delegates.append(delegate)
+        let client: CentrifugeClient = CentrifugeClient(endpoint: server.url, config: tokenExchangeConfig(exchange), delegate: delegate)
+        client.connect()
+        await fulfillment(of: [connected], within: 5)
+
+        let outcomes: LockedBox<[String]> = LockedBox([])
+        let secondSettled: Expectation = Expectation("second refresh settled")
+        client.refresh(completion: { (result: Result<CentrifugeRefreshResult, Error>) in
+            outcomes.update { (values: inout [String]) in
+                values.append(outcomeLabel(result))
+            }
+        })
+        await stalled.awaitCount(times: 1)
+        client.refresh(token: "explicit-token", completion: { (result: Result<CentrifugeRefreshResult, Error>) in
+            outcomes.update { (values: inout [String]) in
+                values.append(outcomeLabel(result))
+            }
+            secondSettled.fulfill()
+        })
+        // The exchange of the first call completes after the second call is admitted, which must not fail the first.
+        held.current?(.success(CentrifugeTokenExchangeResult(token: "access-2", refreshToken: "refresh-3")))
+        await fulfillment(of: [secondSettled], within: 5)
+        #expect(outcomes.current == ["ok", "ok"])
+        #expect(exchange.storedToken == "refresh-3")
+        #expect(server.received().filter(\.hasRefresh).map(\.refresh.token) == ["access-1", "access-2", "explicit-token"])
     }
 }

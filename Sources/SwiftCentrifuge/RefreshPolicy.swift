@@ -67,10 +67,12 @@ internal func refreshFailureAction(_ error: Error) -> RefreshFailureAction {
 internal func refreshRetryDelay(step: Int, tokenRetryCap: TimeInterval, random: ClientRandom) -> TimeInterval {
     let scaledCeiling: TimeInterval = refreshRetryFirstCeilingSeconds * pow(2, Double(step))
     let ceilingSeconds: TimeInterval = max(refreshRetryFirstCeilingSeconds, min(tokenRetryCap, scaledCeiling))
-    let ceiling: UInt64 = clientNanos(ceilingSeconds)
-    let minimum: UInt64 = clientNanos(refreshRetryMinimumSeconds)
-    let jitter: UInt64 = fullJitterNanos(base: minimum, attempt: step, cap: ceiling, random: random)
-    let delay: UInt64 = min(ceiling, minimum + jitter)
+    let delay: UInt64 = boundedBackoffNanos(
+        minimumNanos: clientNanos(refreshRetryMinimumSeconds),
+        ceilingNanos: clientNanos(ceilingSeconds),
+        attempt: step,
+        random: random
+    )
     return TimeInterval(delay) / 1e9
 }
 

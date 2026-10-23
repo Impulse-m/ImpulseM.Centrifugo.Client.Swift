@@ -8,7 +8,10 @@ import Foundation
 //
 // Everything here runs on syncQueue. The application's load, store and exchange complete on any thread, and each
 // completion hops back to syncQueue before it touches the state. A callback of a stale attempt (its connection
-// is gone, or it timed out) changes no run and ends no session: its refresh token rotation is still stored.
+// is gone, or it timed out) changes no run and ends no session: its refresh token rotation is still stored, as long
+// as the client is alive. The completions hold the client weakly, so a client released while an exchange is in
+// flight loses that rotation: the issuer has consumed the old refresh token and the new one is never stored, and the
+// session is lost at the next launch. An application keeps its client alive until its sign-in exchanges have ended.
 
 /// The bounds of the retry of a failed bootstrap step, in seconds. The delay is the Java formula of the backoff:
 /// min(maximum, minimum + uniform[0, min(maximum, minimum * 2^step)]).
@@ -19,10 +22,6 @@ internal let tokenBootstrapMaximumSeconds: TimeInterval = 60
 internal let tokenRenewalStartShare: Double = 0.7
 internal let tokenRenewalEarlyStartShare: Double = 0.6
 internal let tokenRenewalEndShare: Double = 0.9
-
-/// The steps of one random draw in a renewal window: the draw is a count out of this many.
-private let tokenRenewalDrawSteps: UInt64 = 1_000_000_000
-
 
 /// The outcome of storing a rotated refresh token.
 internal enum TokenStoreOutcome {
@@ -69,9 +68,35 @@ internal extension CentrifugeClient {
         // The anonymous reply refuses the token the connect sent, so none is kept.
         self.token = ""
         tokenExchangeState.expiry = nil
+        // The server pings while the bootstrap holds the connection, and each ping is answered (handlePing). The
+        // watchdog itself is armed by the connect that resumes.
+        if result.ping > 0 {
+            self.pingInterval = result.ping
+            self.sendPong = result.pong
+        }
         tokenExchangeState.bootstrap = TokenExchangeBootstrap(transportId: self.transportId, pending: result)
         startBootstrapStep()
         return true
+    }
+
+    /// Holds a subscribe or an unsubscribe push that arrives while the bootstrap runs (handlePush hook). The connect
+    /// resumes with the held subscriptions merged in, so no event is delivered for them before the connect. Returns
+    /// true when the push was held.
+    func holdTokenExchangePush(_ push: Centrifugal_Centrifuge_Protocol_Push) -> Bool {
+        guard tokenExchangeState.bootstrap != nil else {
+            return false
+        }
+        if push.hasSubscribe {
+            tokenExchangeState.bootstrap?.heldSubscribes[push.channel] = push.subscribe
+            tokenExchangeState.bootstrap?.heldUnsubscribes.remove(push.channel)
+            return true
+        }
+        if push.hasUnsubscribe {
+            tokenExchangeState.bootstrap?.heldSubscribes.removeValue(forKey: push.channel)
+            tokenExchangeState.bootstrap?.heldUnsubscribes.insert(push.channel)
+            return true
+        }
+        return false
     }
 
     /// Called when the connection is lost (processDisconnect hook). The bootstrap of the connection ends with it, and
@@ -97,20 +122,19 @@ internal extension CentrifugeClient {
             return TimeInterval(ttl)
         }
         let windowStart: Double = exchange.earlyRenewal ? tokenRenewalEarlyStartShare : tokenRenewalStartShare
-        let draw: UInt64 = random.uniform(0 ... tokenRenewalDrawSteps - 1)
-        let share: Double = windowStart + (tokenRenewalEndShare - windowStart) * Double(draw) / Double(tokenRenewalDrawSteps)
+        let share: Double = windowStart + (tokenRenewalEndShare - windowStart) * uniformFraction(random)
         return TimeInterval(ttl) * share
     }
 
-    /// The connection token of the timer refresh (getConnectionToken hook): the access token is exchanged over the
-    /// connected connection. The completion runs on syncQueue, with the access token or the error.
+    /// The connection token of a renewal (getConnectionToken hook): the access token is exchanged over the connected
+    /// connection. It serves the timer refresh and refresh() without a token. The completion runs on syncQueue, with
+    /// the access token or the error. A timer fetch that a refresh() call superseded is dropped by its caller.
     func renewTokenExchangeToken(completion: @escaping (Result<String, Error>) -> Void) {
         self.syncQueue.async { [weak self] in
             guard let strongSelf: CentrifugeClient = self else {
                 return
             }
             let transportId: UInt64 = strongSelf.transportId
-            let generation: UInt64 = strongSelf.refreshState.generation
             strongSelf.loadStoredRefreshToken(completion: { [weak self] (stored: Result<String?, Error>) in
                 guard let owner: CentrifugeClient = self else {
                     return
@@ -127,7 +151,7 @@ internal extension CentrifugeClient {
                         completion(.failure(CentrifugeError.unauthorized))
                         return
                     }
-                    owner.runRenewalExchange(transportId: transportId, refreshToken: refreshToken, generation: generation, completion: completion)
+                    owner.runRenewalExchange(transportId: transportId, refreshToken: refreshToken, completion: completion)
                 }
             })
         }
@@ -365,6 +389,12 @@ internal extension CentrifugeClient {
             connect.user = refreshed.user
             connect.authClass = refreshed.authClass
         }
+        for (channel, subscribe) in bootstrap.heldSubscribes {
+            connect.subs[channel] = tokenExchangeSubscribeResult(subscribe)
+        }
+        for channel in bootstrap.heldUnsubscribes {
+            connect.subs.removeValue(forKey: channel)
+        }
         observeTokenExpiry(expires: connect.expires, ttl: connect.ttl)
         resumeConnect(connect)
     }
@@ -405,10 +435,12 @@ internal extension CentrifugeClient {
     func nextBootstrapBackoffNanos() -> UInt64 {
         let step: Int = tokenExchangeState.bootstrapAttempt
         tokenExchangeState.bootstrapAttempt += 1
-        let minimum: UInt64 = clientNanos(tokenBootstrapMinimumSeconds)
-        let maximum: UInt64 = clientNanos(tokenBootstrapMaximumSeconds)
-        let jitter: UInt64 = fullJitterNanos(base: minimum, attempt: step, cap: maximum, random: random)
-        return min(maximum, minimum + jitter)
+        return boundedBackoffNanos(
+            minimumNanos: clientNanos(tokenBootstrapMinimumSeconds),
+            ceilingNanos: clientNanos(tokenBootstrapMaximumSeconds),
+            attempt: step,
+            random: random
+        )
     }
 
     /// Ends a bootstrap whose exchange stalled, or whose refresh outcome is unknown. The error is reported, and the
@@ -455,7 +487,7 @@ internal extension CentrifugeClient {
     /// rotation is stored only while the application still holds the refresh token the exchange used
     /// (compare-and-store), so a newer token, or a logout that cleared the storage, is never overwritten. A
     /// failed read or store is reported, and the exchange goes on.
-    func storeRotation(_ rotated: String?, used refreshToken: String, completion: @escaping (TokenStoreOutcome) -> Void) {
+    func storeRotation(_ rotated: String?, used refreshToken: String, completion: @escaping (TokenStoreOutcome) -> Void = { _ in }) {
         guard let newToken: String = rotated, !newToken.isEmpty, newToken != refreshToken, let exchange: CentrifugeTokenExchange = config.tokenExchange else {
             completion(.done)
             return
@@ -495,13 +527,12 @@ internal extension CentrifugeClient {
     /// The rotation of a stale exchange: stored by the rule of storeRotation, and its access token is not used. A
     /// session end of the read is dropped with the outcome.
     func storeAbandonedRotation(_ result: Result<CentrifugeTokenExchangeResult, Error>, used refreshToken: String) {
-        storeRotation(rotatedRefreshTokenOf(result), used: refreshToken, completion: { (_: TokenStoreOutcome) in
-        })
+        storeRotation(rotatedRefreshTokenOf(result), used: refreshToken)
     }
 
-    /// The renewal exchange of the timer refresh. The client timeout is its deadline: an exchange that comes after it
+    /// The renewal exchange of a renewal. The client timeout is its deadline: an exchange that comes after it
     /// changes no run, and its rotation is stored.
-    func runRenewalExchange(transportId: UInt64, refreshToken: String, generation: UInt64, completion: @escaping (Result<String, Error>) -> Void) {
+    func runRenewalExchange(transportId: UInt64, refreshToken: String, completion: @escaping (Result<String, Error>) -> Void) {
         guard let exchange: CentrifugeTokenExchange = config.tokenExchange else {
             return
         }
@@ -529,26 +560,21 @@ internal extension CentrifugeClient {
                     return
                 }
                 deadline.cancel()
-                strongSelf.onRenewalExchanged(transportId: transportId, refreshToken: refreshToken, generation: generation, result: result, completion: completion)
+                strongSelf.onRenewalExchanged(transportId: transportId, refreshToken: refreshToken, result: result, completion: completion)
             }
         })
     }
 
-    /// The outcome of a renewal exchange. A result on a lost connection, or one that a refresh() call superseded, is stale:
-    /// it changes no run, and its rotation is stored.
+    /// The outcome of a renewal exchange. A result on a lost connection is stale: it changes no run, and its rotation
+    /// is stored. A refresh() call admitted meanwhile does not make it stale: a timer fetch that it superseded is
+    /// dropped by its caller, and an explicit fetch is the first call and goes on.
     func onRenewalExchanged(
         transportId: UInt64,
         refreshToken: String,
-        generation: UInt64,
         result: Result<CentrifugeTokenExchangeResult, Error>,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         guard self.transportId == transportId, self.state == .connected else {
-            storeAbandonedRotation(result, used: refreshToken)
-            completion(.failure(CentrifugeError.connectionClosed))
-            return
-        }
-        guard generation == refreshState.generation else {
             storeAbandonedRotation(result, used: refreshToken)
             completion(.failure(CentrifugeError.connectionClosed))
             return
@@ -575,7 +601,7 @@ internal extension CentrifugeClient {
             switch result {
             case .failure(let error):
                 if isTokenExchangeUnauthorized(error) {
-                    strongSelf.reloadRenewalAfterRefusal(transportId: transportId, refreshToken: refreshToken, generation: generation, completion: completion)
+                    strongSelf.reloadRenewalAfterRefusal(transportId: transportId, refreshToken: refreshToken, completion: completion)
                 } else {
                     completion(.failure(error))
                 }
@@ -591,7 +617,7 @@ internal extension CentrifugeClient {
 
     /// The renewal was refused: the stored token is read again, as in reloadAfterRefusal. Within the grace, the fetch
     /// fails once with the retry message, and the timer refresh fetches again.
-    func reloadRenewalAfterRefusal(transportId: UInt64, refreshToken: String, generation: UInt64, completion: @escaping (Result<String, Error>) -> Void) {
+    func reloadRenewalAfterRefusal(transportId: UInt64, refreshToken: String, completion: @escaping (Result<String, Error>) -> Void) {
         loadStoredRefreshToken(completion: { [weak self] (again: Result<String?, Error>) in
             guard let strongSelf: CentrifugeClient = self else {
                 return
@@ -609,7 +635,7 @@ internal extension CentrifugeClient {
                     return
                 }
                 if token != refreshToken {
-                    strongSelf.runRenewalExchange(transportId: transportId, refreshToken: token, generation: generation, completion: completion)
+                    strongSelf.runRenewalExchange(transportId: transportId, refreshToken: token, completion: completion)
                     return
                 }
                 if strongSelf.refusalHorizonPassed() || strongSelf.tokenExchangeState.refusals >= tokenExchangeRefusalRetries {
@@ -644,7 +670,7 @@ internal extension CentrifugeClient {
             var command: Centrifugal_Centrifuge_Protocol_Command = Centrifugal_Centrifuge_Protocol_Command()
             command.id = strongSelf.nextCommandId()
             command.rpc = request
-            strongSelf.sendPlainCommand(command: command, completion: { (reply: Centrifugal_Centrifuge_Protocol_Reply?, error: Error?) in
+            strongSelf.sendCommand(command: command, completion: { (reply: Centrifugal_Centrifuge_Protocol_Reply?, error: Error?) in
                 if let failure: Error = error {
                     completion(.failure(failure))
                     return
@@ -683,4 +709,17 @@ private func rotatedRefreshTokenOf(_ result: Result<CentrifugeTokenExchangeResul
         return nil
     }
     return exchanged.refreshToken
+}
+
+
+/// The subscribe result of a subscribe push held by the bootstrap, as the connect result carries it. The push has no
+/// publications and no recovery, so neither is copied.
+private func tokenExchangeSubscribeResult(_ subscribe: Centrifugal_Centrifuge_Protocol_Subscribe) -> Centrifugal_Centrifuge_Protocol_SubscribeResult {
+    var result: Centrifugal_Centrifuge_Protocol_SubscribeResult = Centrifugal_Centrifuge_Protocol_SubscribeResult()
+    result.recoverable = subscribe.recoverable
+    result.positioned = subscribe.positioned
+    result.offset = subscribe.offset
+    result.epoch = subscribe.epoch
+    result.data = subscribe.data
+    return result
 }
