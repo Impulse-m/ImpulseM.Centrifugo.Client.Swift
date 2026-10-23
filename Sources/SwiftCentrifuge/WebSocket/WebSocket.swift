@@ -4,6 +4,7 @@
 //
 //  Created by Dalton Cherry on 7/16/14.
 //  Copyright (c) 2014-2017 Dalton Cherry.
+//  Modified by ImpulseM; see THIRD_PARTY_NOTICES.md.
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.

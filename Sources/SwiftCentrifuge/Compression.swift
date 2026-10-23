@@ -4,6 +4,7 @@
 //
 //  Created by Joseph Ross on 7/16/14.
 //  Copyright © 2017 Joseph Ross.
+//  Modified by ImpulseM; see THIRD_PARTY_NOTICES.md.
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.

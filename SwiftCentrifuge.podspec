@@ -8,12 +8,13 @@ Pod::Spec.new do |s|
     s.summary               = 'Centrifugo and Centrifuge client in Swift'
 
     s.author                = { 'Alexander Emelin' => 'frvzmb@gmail.com' }
-    s.license               = { :type => 'MIT', :file => 'LICENSE' }
+    s.license               = { :type => 'MIT AND Apache-2.0 AND BSD-2-Clause', :file => 'LICENSE' }
     s.platforms             = { :ios => '12.0' }
     s.ios.deployment_target = '12.0'
 
     s.source_files          = 'Sources/SwiftCentrifuge/*.swift', 'Sources/SwiftCentrifuge/WebSocket/*.swift'
     s.source                = { :git => 'https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git', :tag => s.version }
+    s.preserve_paths        = 'THIRD_PARTY_NOTICES.md', 'licenses/*.txt'
 
     s.dependency 'SwiftProtobuf'
 end
