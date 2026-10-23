@@ -106,6 +106,10 @@ internal func redirectSessionConfiguration(_ session: URLSession?) -> URLSession
     if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
         configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
         configuration.tlsMaximumSupportedProtocolVersion = source.tlsMaximumSupportedProtocolVersion
+    } else {
+        // Older systems only have the deprecated SSLProtocol properties. Their use warns, and does not fail the build.
+        configuration.tlsMinimumSupportedProtocol = source.tlsMinimumSupportedProtocol
+        configuration.tlsMaximumSupportedProtocol = source.tlsMaximumSupportedProtocol
     }
     configuration.timeoutIntervalForRequest = source.timeoutIntervalForRequest
     configuration.timeoutIntervalForResource = source.timeoutIntervalForResource
