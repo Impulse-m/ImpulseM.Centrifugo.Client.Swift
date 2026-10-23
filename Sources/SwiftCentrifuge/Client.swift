@@ -317,6 +317,8 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var sendPong: Bool = false
     // The ping watchdog (F11): the clock time of the last decoded batch that carried a reply.
     internal var lastReplyNanos: UInt64 = 0
+    // The publish debounce windows of the subscriptions and their one timer (PublishDebounce.swift).
+    internal var publishDebounce: PublishDebounceState = PublishDebounceState()
     fileprivate var reconnectTask: DispatchWorkItem?
     fileprivate var log: CentrifugeLogger
 
@@ -1448,6 +1450,7 @@ internal extension CentrifugeClient {
         let needEvent = previousState != self.state
         
         self.rpcTracker.onTransportLost(terminal: !reconnect)
+        self.resetPublishDebounce()
         self.client = nil
 
         // Channel compaction IDs are scoped to a server session — drop the routing

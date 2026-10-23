@@ -110,6 +110,11 @@ Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends th
 - The connection closes with code 2 (`no ping`) and reconnects when the server has been silent for one window: the server's ping interval plus `CentrifugeClientConfig.maxServerPingDelay`. Any reply counts as activity: a command reply, a push or a server ping. The detection is one window after the last reply.
 - A server ping still gets its pong when the server asks for one.
 
+## Publish debounce
+
+- The server sets the publish window of a channel in its subscribe result (`publishDebounce`, milliseconds). A window of 0, the default, sends every publish. Otherwise the first publish is sent at once and opens the window; the publishes that follow inside the window replace one pending value, whose completion succeeds at once. The pending value is sent when the window ends, and a new window starts. A window longer than 2^31 - 1 ms is treated as 2^31 - 1 ms.
+- The pending value is dropped when the subscription is unsubscribed or the connection is lost, so it is never sent after either.
+
 ## Usage in background
 
 When a mobile application goes to the background there are OS-specific limitations for established persistent connections - which can be silently closed shortly. Thus in most cases you need to disconnect from a server when app moves to the background and connect again when app goes to the foreground.

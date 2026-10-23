@@ -213,7 +213,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
                 completion(.failure(err))
                 return
             }
-            self?.centrifuge?.publish(channel: channel, data: data, completion: completion)
+            self?.centrifuge?.publishThroughDebounce(channel: channel, data: data, completion: completion)
         })
     }
     
@@ -348,6 +348,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
             // server (0 when not negotiated — also clears a stale ID from a previous
             // subscribe session).
             strongSelf.setPushId(result.id)
+            strongSelf.centrifuge?.setPublishDebounceWindow(channel: strongSelf.channel, millis: result.publishDebounce)
             for cb in strongSelf.callbacks.values {
                 cb(nil)
             }
@@ -731,6 +732,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
             self.state = .unsubscribed
             self.attempt &+= 1
             self.resubscribeAttempts = 0
+            self.centrifuge?.dropPublishDebounce(channel: self.channel)
             // Channel compaction ID is no longer valid once unsubscribed.
             self.setPushId(0)
 
