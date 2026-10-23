@@ -40,6 +40,9 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     /// Set when the pool closes the connection or drops it. Its client's later events are then ignored.
     internal var closed: Bool = false
 
+    /// Whether the connection is in its endpoint's list, and counted in the pool's stats totals (RpcPool.swift).
+    internal var attached: Bool = false
+
     internal var isConnected: Bool {
         return self.linkState == .connected
     }

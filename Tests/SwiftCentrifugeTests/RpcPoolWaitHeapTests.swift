@@ -286,4 +286,69 @@ final class RpcPoolWaitHeapTests: @unchecked Sendable {
         #expect(arms.current == 1, "the refusal arms the timer once, for the end of the resend's delay")
         withExtendedLifetime(main.delegate) {}
     }
+
+
+    @Test func repeatedLossesOfTheSameCallsLeaveABoundedDueHeap() async throws {
+        let calls: Int = 64
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc
+        }
+        let main: WaitHarness = await connectedMain()
+        let url: String = fake.server.url
+        let options: CentrifugeRpcPoolOptions = CentrifugeRpcPoolOptions(
+            endpoints: { (_: String) -> [String] in
+                return [url]
+            },
+            maxConnectionsPerEndpoint: 1,
+            maxInflightPerConnection: calls,
+            maxQueued: 2 * calls,
+            retries: 3
+        )
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: options)
+        let done: Expectation = Expectation("every call timed out")
+        let log: LockedBox<[String]> = LockedBox<[String]>([])
+        for index: Int in 0 ..< calls {
+            pool.rpc(
+                endpointKey: "",
+                method: "m",
+                data: Data(),
+                options: CentrifugeRpcPoolCallOptions(timeout: 4.0)
+            ) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+                log.update { (labels: inout [String]) -> Void in
+                    labels.append("\(index):" + waitLabelOf(result))
+                }
+                if log.current.count == calls {
+                    done.fulfill()
+                }
+            }
+        }
+
+        // Each loss of the transport sends the calls in flight back to the line, and the pool places them again once the
+        // connection is back. Three losses are the most that `retries` allows, so each call is resent three times, and
+        // each resend leaves its earlier deadline entry standing beside the new one.
+        await fake.awaitArrivals("first sends", count: calls) { (command: RpcCommand) -> Bool in
+            return command.hasRpc
+        }
+        for cycle: Int in 1 ... 3 {
+            fake.server.closeConnection()
+            await fake.awaitArrivals("resent after loss \(cycle)", count: calls * (cycle + 1)) { (command: RpcCommand) -> Bool in
+                return command.hasRpc
+            }
+        }
+
+        // The last sends are never answered, so each call times out on the connection at its own deadline.
+        await fulfillment(of: done, within: 10)
+        #expect(log.current.count == calls, "each call settles once")
+        let timedOut: Bool = log.current.allSatisfy { (label: String) -> Bool in
+            return label.hasSuffix(":timeout")
+        }
+        #expect(timedOut, "every call times out")
+        // A call holds one standing entry, so the heap keeps at most two entries per call: the bound holds after every
+        // event, and the compaction keeps it there without a scan per event.
+        let entries: Int = main.client.syncQueue.sync { () -> Int in
+            return pool.dueEntryCount
+        }
+        #expect(entries <= 2 * calls, "the due heap keeps at most two entries per call, however often a call returns to a line")
+        withExtendedLifetime(main.delegate) {}
+    }
 }

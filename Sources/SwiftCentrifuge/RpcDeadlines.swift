@@ -122,6 +122,16 @@ internal struct RpcPoolDue: RpcTimed {
 }
 
 
+/// The identity of a due moment of a call: the call and the moment. A call stands at one moment at a time, so two
+/// entries with the same identity are duplicates, and the compaction of the wait timer keeps one of them.
+internal struct RpcPoolDueKey: Hashable {
+    /// The identity of the call.
+    let call: ObjectIdentifier
+    /// The moment, in monotonic nanoseconds.
+    let nanos: UInt64
+}
+
+
 /// The moment at which the reply route of a command is dropped.
 internal struct RpcRouteExpiry {
     /// The command id of the route.

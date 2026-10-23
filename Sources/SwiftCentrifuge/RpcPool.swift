@@ -62,6 +62,12 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// The calls that wait for the timer: in a line, in a redirect fetch, or in a later resend's delay.
     private var timedWaits: Int = 0
 
+    /// The attached connections of the endpoints, and the calls in flight on them. The stats snapshot reads them, so they
+    /// are kept as the connections attach and detach and the slots are taken and released, and the snapshot costs no scan.
+    private var connectionCount: Int = 0
+
+    private var inflightCount: Int = 0
+
     /// Every call that is not settled yet, so that `close` settles them all.
     private var unsettled: [ObjectIdentifier: RpcPoolCall] = [:]
 
@@ -508,6 +514,9 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         call.endpointURL = conn.endpoint.url
         call.holdsSlot = true
         conn.inFlight += 1
+        if conn.attached {
+            inflightCount += 1
+        }
         let queue: DispatchQueue = self.queue
         let handle: CentrifugeRpcCall = conn.client.rpc(
             method: call.method,
@@ -674,6 +683,9 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         }
         call.holdsSlot = false
         conn.inFlight -= 1
+        if conn.attached {
+            inflightCount -= 1
+        }
         conn.lastUse = main.clock.monotonicNanos()
         if conn.inFlight == 0 {
             if endedSessionClosesIdle() && conn.lostCalls.isEmpty {
@@ -732,7 +744,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             tokenSource: tokenSource
         )
         endpoint.holdUntil = nil
-        endpoint.connections.append(conn)
+        attachConnection(conn)
         conn.client.connect()
         armIdle(conn)
         publishStats()
@@ -793,9 +805,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         }
         conn.closed = true
         conn.idleTimer.cancel()
-        conn.endpoint.connections.removeAll { (candidate: RpcPoolConnection) -> Bool in
-            return candidate === conn
-        }
+        detachConnection(conn)
         let lost: [RpcPoolCall] = conn.lostCalls
         conn.lostCalls = []
         let repeatsLoss: Bool = code == disconnectCodeMessageSizeLimit || code == disconnectedCodeUnauthorized
@@ -886,10 +896,32 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     private func closeConnection(_ conn: RpcPoolConnection) {
         conn.closed = true
         conn.idleTimer.cancel()
+        detachConnection(conn)
+        conn.client.disconnect()
+    }
+
+
+    /// Adds a connection to its endpoint, and counts it in the stats totals.
+    private func attachConnection(_ conn: RpcPoolConnection) {
+        conn.endpoint.connections.append(conn)
+        conn.attached = true
+        connectionCount += 1
+        inflightCount += conn.inFlight
+    }
+
+
+    /// Removes a connection from its endpoint, and takes it and its calls in flight out of the stats totals. A connection
+    /// that is not attached is left as it is, so a second removal changes no count.
+    private func detachConnection(_ conn: RpcPoolConnection) {
+        guard conn.attached else {
+            return
+        }
+        conn.attached = false
         conn.endpoint.connections.removeAll { (candidate: RpcPoolConnection) -> Bool in
             return candidate === conn
         }
-        conn.client.disconnect()
+        connectionCount -= 1
+        inflightCount -= conn.inFlight
     }
 
 
@@ -1127,13 +1159,19 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
 
 
     /// Drops the entries of the due moments that no longer stand once they outnumber the timed waits twofold, so the
-    /// heap holds about one entry per waiting call. The cost is linear in the heap, and amortised O(1) per entry added.
+    /// heap holds about one entry per waiting call. A call that returns to a line or a fetch with the same deadline
+    /// leaves its earlier entry standing, so only the first entry of each call and moment is kept. The kept entries
+    /// are at most the timed waits, so the cost is linear in the heap, and amortised O(1) per entry added.
     private func compactCallDuesIfNeeded() {
         if closed || callDues.count <= 2 * timedWaits {
             return
         }
+        var kept: Set<RpcPoolDueKey> = []
         callDues.keep { (due: RpcPoolDue) -> Bool in
-            return self.isStandingCallDue(due)
+            guard let call: RpcPoolCall = due.call, self.isStandingCallDue(due) else {
+                return false
+            }
+            return kept.insert(RpcPoolDueKey(call: ObjectIdentifier(call), nanos: due.nanos)).inserted
         }
     }
 
@@ -1252,19 +1290,12 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     }
 
 
-    /// Writes the stats snapshot. Called on the queue after each change of the pool's state.
+    /// Writes the stats snapshot. Called on the queue after each change of the pool's state. The totals are kept as the
+    /// state changes, so the snapshot costs no scan of the endpoints or the connections.
     private func publishStats() {
-        var connections: Int = 0
-        var inflight: Int = 0
-        for endpoint: RpcPoolEndpoint in endpointsByURL.values {
-            for conn: RpcPoolConnection in endpoint.connections {
-                connections += 1
-                inflight += conn.inFlight
-            }
-        }
         let snapshot: CentrifugeRpcPoolStats = CentrifugeRpcPoolStats(
-            connections: connections,
-            inflight: inflight,
+            connections: connectionCount,
+            inflight: inflightCount,
             queued: queuedCount(),
             redirects: fetches.runningCount
         )
@@ -1286,6 +1317,7 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             endpoint.holdUntil = nil
             for conn: RpcPoolConnection in endpoint.connections {
                 conn.closed = true
+                conn.attached = false
                 // The lost calls of the connection are settled below with the rest; the connection keeps no reference.
                 conn.lostCalls = []
                 conn.idleTimer.cancel()
@@ -1293,6 +1325,8 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
             }
             endpoint.connections = []
         }
+        connectionCount = 0
+        inflightCount = 0
         fetches.close()
         // The calls settle while the keys and the counts are kept, so each one leaves its wait as it settles.
         for call: RpcPoolCall in Array(unsettled.values) {
