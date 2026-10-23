@@ -103,8 +103,10 @@ internal func redirectSessionConfiguration(_ session: URLSession?) -> URLSession
     }
     let source: URLSessionConfiguration = given.configuration
     configuration.connectionProxyDictionary = source.connectionProxyDictionary
-    configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
-    configuration.tlsMaximumSupportedProtocolVersion = source.tlsMaximumSupportedProtocolVersion
+    if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+        configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
+        configuration.tlsMaximumSupportedProtocolVersion = source.tlsMaximumSupportedProtocolVersion
+    }
     configuration.timeoutIntervalForRequest = source.timeoutIntervalForRequest
     configuration.timeoutIntervalForResource = source.timeoutIntervalForResource
     configuration.protocolClasses = source.protocolClasses
