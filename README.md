@@ -97,6 +97,12 @@ Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends th
 
 `clientRejected(code:message:)` carries the refusals the client makes itself, such as a closed rpc pool. It is never a server reply.
 
+## RPC pool
+
+`CentrifugeRpcPool(main:options:)` (or `CentrifugeRpcPool.create`, which throws for options that cannot work) runs plain calls for large payloads on several connections per endpoint URL. `endpoints` maps an endpoint key to URLs; each connection carries up to `maxInflightPerConnection` calls (default 1), and at most `maxConnectionsPerEndpoint` connections open per URL (default 2). A call that finds no free slot waits in the line of its key, up to `maxQueued` (default 64); a call beyond that fails with `replyError(code: 16)` unless it can open a connection. A connection without calls for `idleTimeout` (default 60 seconds) closes. `close(completion:)` closes every connection: waiting calls fail with `replyError(code: 17)`, calls in flight with `connectionClosed`, and later calls with `clientRejected(code: 4)`. The pool's calls use the main client's queue and clock, so a delegate callback may call `stats()` and `close(completion:)`.
+
+A call made while the main client is disconnected fails with `clientDisconnected`, or with `unauthorized` when the session ended. A call whose options cannot work (for example an `affinity` without `affinityHeader`, or a `timeout` above the pool's) fails with `configurationError`. This version connects the pool's connections without a token and does not resend, reroute or redirect a call; a call fails with the answer of its connection.
+
 ## Connection token refresh
 
 - `refresh(token:completion:)` refreshes the connection token now. With a token it sends that token; without one it fetches it from `tokenGetter`. The completion gets a `CentrifugeRefreshResult` (`expires`, `ttl`, `user`, `authClass`) or the server's error, unchanged. A refused token is not kept: the previous one stays. A call made while disconnected waits for the next connection. Calls run one at a time; at most 32 are in progress, and a call beyond that fails with code 16. Without a token and without a `tokenGetter`, the call fails with `configurationError`.

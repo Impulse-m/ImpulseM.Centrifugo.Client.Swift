@@ -320,6 +320,9 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
     internal var refreshRequired: Bool = false
+    // Set by every disconnect: true when it is the unauthorized one, which ends the session. The rpc pool
+    // reads it while the client is disconnected (RpcPool.swift).
+    internal var sessionEnded: Bool = false
     // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
     internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
@@ -1465,6 +1468,7 @@ internal extension CentrifugeClient {
         }
         
         let previousState = self.state
+        self.sessionEnded = code == disconnectedCodeUnauthorized
 
         // Close the transport before anything else, so that events emitted below
         // never see it, and frames it already read are not delivered.

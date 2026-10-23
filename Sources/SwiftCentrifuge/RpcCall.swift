@@ -59,17 +59,25 @@ public struct CentrifugeReplyError: Equatable {
 /// once, and a sent call also gets a cancel command for the server. Calling it after the call
 /// completed does nothing.
 public final class CentrifugeRpcCall: @unchecked Sendable {
-    private let slot: RpcCallSlot
+    private let onCancel: () -> Void
 
 
     internal init(slot: RpcCallSlot) {
-        self.slot = slot
+        self.onCancel = {
+            slot.cancel()
+        }
+    }
+
+
+    /// A handle whose cancel runs `onCancel`. The rpc pool uses it for its own calls (RpcPool.swift).
+    internal init(onCancel: @escaping () -> Void) {
+        self.onCancel = onCancel
     }
 
 
     /// Cancels the call. Safe to call from any thread and from a delegate callback.
     public func cancel() {
-        self.slot.cancel()
+        self.onCancel()
     }
 }
 
