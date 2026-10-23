@@ -26,9 +26,12 @@ internal final class RpcPoolCall {
     /// Whether the call still holds a slot of `connection`: set at placement, cleared when the connection answers.
     internal var holdsSlot: Bool = false
 
-    /// The resends the call has made, of any cause (a loss, a later refusal, a move). `retries` bounds it, and the
-    /// delay of a later resend grows with it.
+    /// The resends the call has made, of any cause (a loss, a later refusal, a move). `retries` bounds it.
     internal var resends: Int = 0
+
+    /// The later resends the call has made. The delay of the next later resend grows with it, and no other cause
+    /// counts here.
+    internal var laterResends: Int = 0
 
     /// The monotonic moment a later resend of the call is due. Set while the call waits in the resend wait list.
     internal var resendAt: UInt64 = 0

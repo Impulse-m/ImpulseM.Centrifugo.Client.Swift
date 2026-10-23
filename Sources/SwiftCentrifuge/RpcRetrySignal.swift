@@ -50,6 +50,14 @@ internal let rpcCodeLimitExceeded: UInt32 = 16
 /// A call the client cancelled, before or after it was sent.
 internal let rpcCodeCancelled: UInt32 = 17
 
+/// The lowest code of a server error reply. Codes below it are the client's own, never a server reply.
+internal let rpcServerErrorFloor: UInt32 = 100
+
+/// The error of a call the client cancelled, with the code 17.
+internal func cancelledCallError() -> CentrifugeError {
+    return CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false)
+}
+
 
 /// The two resend signals of the server.
 internal enum RpcRetrySignal: Equatable {

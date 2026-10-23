@@ -209,7 +209,7 @@ internal final class RpcTracker {
         guard let target: TrackedRpc = call else {
             return
         }
-        self.finishLocally(target, error: CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false))
+        self.finishLocally(target, error: cancelledCallError())
         self.armTimer()
     }
 

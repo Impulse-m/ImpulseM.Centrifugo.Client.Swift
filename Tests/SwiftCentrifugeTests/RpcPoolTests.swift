@@ -32,10 +32,11 @@ private final class PoolOutcome: @unchecked Sendable {
 }
 
 
-/// A main client and the delegate it keeps weakly: the test holds both.
+/// A main client, the delegate it keeps weakly (the test holds both), and the scheduler it runs its timers on.
 private struct MainHarness {
     let client: CentrifugeClient
     let delegate: CentrifugeClientDelegate
+    let scheduler: ManualScheduler
 }
 
 
@@ -73,35 +74,20 @@ private func isRpcCommand(_ command: RpcCommand) -> Bool {
 }
 
 
-/// A main client on the manual clock and scheduler, with the delegate it keeps weakly.
-private struct ManualMainHarness {
-    let setup: ManualClientSetup
-    let delegate: RecordingClientDelegate
-}
-
-
 /// The reply of a server refusal with the later retry signal, as the server sends it.
 private func laterRefusalReply() -> RpcReply {
-    var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
-    error.code = 111
-    error.message = "too many requests"
-    error.temporary = true
-    error.metadata = [rpcRetryMetadataKey: rpcRetryValueLater]
-    var reply: RpcReply = RpcReply()
-    reply.error = error
-    return reply
+    return rpcErrorReply(
+        code: 111,
+        message: "too many requests",
+        temporary: true,
+        metadata: [rpcRetryMetadataKey: rpcRetryValueLater]
+    )
 }
 
 
 /// The reply of a server error that moves the call to the endpoint key "b".
 private func moveReply() -> RpcReply {
-    var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
-    error.code = 1000
-    error.message = "moved"
-    error.metadata = ["x-example-relocate": "b"]
-    var reply: RpcReply = RpcReply()
-    reply.error = error
-    return reply
+    return rpcErrorReply(code: 1000, message: "moved", metadata: ["x-example-relocate": "b"])
 }
 
 
@@ -152,8 +138,9 @@ final class RpcPoolTests: @unchecked Sendable {
     }
 
 
-    /// A main client on the manual clock, connected to the fake server, with the given random source.
-    private func connectedManual(random: ClientRandom) async -> ManualMainHarness {
+    /// A main client on the manual clock and scheduler, connected to the fake server, returned once its connect is
+    /// reported. The random source is the test's when one is given.
+    private func connectedMain(random: ClientRandom? = nil) async -> MainHarness {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(
             endpoint: fake.server.url,
@@ -163,21 +150,7 @@ final class RpcPoolTests: @unchecked Sendable {
         )
         setup.client.connect()
         await delegate.awaitConnected(times: 1)
-        return ManualMainHarness(setup: setup, delegate: delegate)
-    }
-
-
-    /// A main client connected to the fake server, returned once its connect is reported.
-    private func connectedMain() async -> MainHarness {
-        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
-        let setup: ManualClientSetup = makeManualClient(
-            endpoint: fake.server.url,
-            config: CentrifugeClientConfig(),
-            delegate: delegate
-        )
-        setup.client.connect()
-        await delegate.awaitConnected(times: 1)
-        return MainHarness(client: setup.client, delegate: delegate)
+        return MainHarness(client: setup.client, delegate: delegate, scheduler: setup.scheduler)
     }
 
 
@@ -195,7 +168,7 @@ final class RpcPoolTests: @unchecked Sendable {
         let setup: ManualClientSetup = makeManualClient(endpoint: fake.server.url, config: config, delegate: delegate)
         setup.client.connect()
         await fulfillment(of: disconnected, within: 5)
-        return MainHarness(client: setup.client, delegate: delegate)
+        return MainHarness(client: setup.client, delegate: delegate, scheduler: setup.scheduler)
     }
 
 
@@ -472,10 +445,10 @@ final class RpcPoolTests: @unchecked Sendable {
             return nil
         }
         // Draw 1 gives the ceiling of the delay: 250 ms for the first resend, as `min(250 ms * 2^0, remaining)`.
-        let main: ManualMainHarness = await connectedManual(random: ManualRandom(draw: 1))
-        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.setup.client, options: poolOptions(retries: 1))
+        let main: MainHarness = await connectedMain(random: ManualRandom(draw: 1))
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(retries: 1))
         let armed: Expectation = Expectation("later resend armed")
-        main.setup.scheduler.observe { (call: ScheduledCall) -> Void in
+        main.scheduler.observe { (call: ScheduledCall) -> Void in
             if call.delay == 0.25 {
                 armed.fulfill()
             }
@@ -488,13 +461,202 @@ final class RpcPoolTests: @unchecked Sendable {
 
         // The resend waits on the manual clock: nothing is sent before the clock moves past the delay.
         #expect(fake.allCommands().filter(isRpcCommand).count == 1)
-        await main.setup.scheduler.advance(by: 0.25)
+        await main.scheduler.advance(by: 0.25)
         await fake.awaitArrivals("resend after its delay", count: 2, isRpcCommand)
 
         // The one resend is spent, so the second refusal reaches the call unchanged.
         await fulfillment(of: outcome.done, within: 5)
         #expect(kindOf(outcome.error) == "replyErrorDetails 111")
         #expect(fake.allCommands().filter(isRpcCommand).count == 2)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func laterDelayCountsOnlyLaterResends() async throws {
+        let aData: Data = Data("A".utf8)
+        let dropped: LockedBox<Bool> = LockedBox(false)
+        let refused: LockedBox<Bool> = LockedBox(false)
+        // The first send of A is lost with its connection, the second is refused with the later signal, the third is
+        // answered.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            guard command.hasRpc && command.rpc.data == aData else {
+                return false
+            }
+            if dropped.current {
+                return false
+            }
+            dropped.set(true)
+            return true
+        }
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            guard command.hasRpc && command.rpc.data == aData else {
+                return nil
+            }
+            if refused.current {
+                return nil
+            }
+            refused.set(true)
+            return laterRefusalReply()
+        }
+        // Draw 1 gives the ceiling. The loss resend is not a later resend, so the first later resend is drawn over 250 ms,
+        // where counting every resend would draw over 500 ms.
+        let random: ManualRandom = ManualRandom(draw: 1)
+        let main: MainHarness = await connectedMain(random: random)
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(maxConnectionsPerEndpoint: 1))
+        let armed: Expectation = Expectation("later resend armed")
+        main.scheduler.observe { (call: ScheduledCall) -> Void in
+            if call.delay == 0.25 {
+                armed.fulfill()
+            }
+        }
+        let outcome: PoolOutcome = PoolOutcome("call with a loss and a later refusal")
+        pool.rpc(endpointKey: "", method: "m", data: aData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fake.awaitArrivals("A lost", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+
+        // The transport drops with A in flight: the pool resends it once the connection is back, and that send is refused.
+        fake.server.closeConnection()
+        await fake.awaitArrivals("A refused", count: 2) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+        await fulfillment(of: armed, within: 5)
+        let firstLaterRange: ClosedRange<UInt64> = 0 ... 250_000_000
+        #expect(random.requestedRanges.last == firstLaterRange, "the later delay is drawn over 250 ms * 2^0")
+
+        await main.scheduler.advance(by: 0.25)
+        await fake.awaitArrivals("A sent after its delay", count: 3) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "none")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func poolLaterResendDelayIsCappedAtTheRemainingDeadline() async throws {
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            if command.hasRpc {
+                return laterRefusalReply()
+            }
+            return nil
+        }
+        // The call's deadline is 0.2 s away, which is less than the 250 ms base of the first later resend: the draw is
+        // capped at the remaining 200 ms. With draw 1 the delay is the remaining deadline, 0.2 s.
+        let random: ManualRandom = ManualRandom(draw: 1)
+        let main: MainHarness = await connectedMain(random: random)
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(retries: 3))
+        let armed: Expectation = Expectation("later resend armed at the deadline")
+        main.scheduler.observe { (call: ScheduledCall) -> Void in
+            if call.delay == 0.2 {
+                armed.fulfill()
+            }
+        }
+        let outcome: PoolOutcome = PoolOutcome("refused call with a short deadline")
+        pool.rpc(
+            endpointKey: "",
+            method: "m",
+            data: Data(),
+            options: CentrifugeRpcPoolCallOptions(timeout: 0.2)
+        ) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: armed, within: 5)
+        let remainingRange: ClosedRange<UInt64> = 0 ... 200_000_000
+        #expect(random.requestedRanges.last == remainingRange, "the later delay is drawn over the remaining 200 ms")
+
+        // The resend is due at the deadline, so the call times out and nothing else is sent.
+        await main.scheduler.advance(by: 0.2)
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "timeout")
+        #expect(fake.allCommands().filter(isRpcCommand).count == 1)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func poolDoesNotCallTheRerouteHookWhenNoResendIsPossible() async throws {
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            if command.hasRpc {
+                return moveReply()
+            }
+            return nil
+        }
+        let hookCalls: LockedBox<Int> = LockedBox(0)
+        let main: MainHarness = await connectedMain()
+        var options: CentrifugeRpcPoolOptions = poolOptions(retries: 0)
+        options.reroute = { (reply: CentrifugeReplyError) -> String? in
+            hookCalls.update { (count: inout Int) -> Void in
+                count += 1
+            }
+            return reply.metadata["x-example-relocate"]
+        }
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: options)
+        let outcome: PoolOutcome = PoolOutcome("refused with no resend left")
+        pool.rpc(endpointKey: "a", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: outcome.done, within: 5)
+        // The completion runs after the hook would have run, so the count is final here.
+        #expect(kindOf(outcome.error) == "replyError 1000")
+        #expect(hookCalls.current == 0, "with retries 0 the reroute hook is not called")
+        #expect(fake.allCommands().filter(isRpcCommand).count == 1)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func poolCountsWaitingResendsAgainstMaxQueued() async throws {
+        let aData: Data = Data("A".utf8)
+        let bData: Data = Data("B".utf8)
+        let cData: Data = Data("C".utf8)
+        // A is refused with the later signal, so it waits for its resend. C is never answered and holds the one slot.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == cData
+        }
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            if command.hasRpc && command.rpc.data == aData {
+                return laterRefusalReply()
+            }
+            return nil
+        }
+        let main: MainHarness = await connectedMain(random: ManualRandom(draw: 1))
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(
+            main: main.client,
+            options: poolOptions(maxConnectionsPerEndpoint: 1, maxQueued: 1)
+        )
+        let waiting: Expectation = Expectation("A waits for its resend")
+        main.scheduler.observe { (call: ScheduledCall) -> Void in
+            if call.delay == 0.25 {
+                waiting.fulfill()
+            }
+        }
+        let first: PoolOutcome = PoolOutcome("call A")
+        let firstCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: aData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            first.record(result)
+        }
+        await fulfillment(of: waiting, within: 5)
+
+        // C takes the free slot, so B finds no slot, no opener, and the bound already full with A's resend wait.
+        let second: PoolOutcome = PoolOutcome("call C")
+        let secondCall: CentrifugeRpcCall = pool.rpc(endpointKey: "", method: "m", data: cData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            second.record(result)
+        }
+        await fake.awaitArrivals("C sent", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == cData
+        }
+        let third: PoolOutcome = PoolOutcome("call B")
+        pool.rpc(endpointKey: "", method: "m", data: bData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            third.record(result)
+        }
+        await fulfillment(of: third.done, within: 5)
+        #expect(kindOf(third.error) == "replyError 16")
+
+        secondCall.cancel()
+        firstCall.cancel()
+        await fulfillment(of: [first.done, second.done], within: 5)
+        #expect(kindOf(first.error) == "replyError 17")
+        #expect(kindOf(second.error) == "replyError 17")
         withExtendedLifetime(main.delegate) {}
     }
 

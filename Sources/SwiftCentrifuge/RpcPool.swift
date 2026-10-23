@@ -44,7 +44,8 @@ public final class CentrifugeRpcPool {
     /// Every call that is not settled yet, so that `close` settles them all.
     private var unsettled: [ObjectIdentifier: RpcPoolCall] = [:]
 
-    /// The calls whose later resend waits for its delay. They join their line when the delay ends.
+    /// The calls whose later resend waits for its delay. They join their line when the delay ends. A plain array on
+    /// purpose: the waits count toward `maxQueued` (queuedCount), so the scans over them stay as short as the lines'.
     private var resendWaits: [RpcPoolCall] = []
 
     /// The one timer of the waiting calls' deadlines, the ends of the holds and the ends of the later resend delays.
@@ -393,16 +394,15 @@ public final class CentrifugeRpcPool {
     }
 
 
-    /// A server error reply. The reroute hook sees it first, and a move wins over the later signal (R4.1). Either
-    /// resend needs a resend left and a deadline still ahead. Otherwise the error settles unchanged.
+    /// A server error reply. Either resend needs a resend left and a deadline still ahead, and only then does the
+    /// reroute hook see the reply. A move wins over the later signal (R4.1). Otherwise the error settles unchanged.
     private func serverErrorAnswered(_ call: RpcPoolCall, reply: CentrifugeReplyError, error: Error) {
         let now: UInt64 = main.clock.monotonicNanos()
-        let movedKey: String? = options.reroute?(reply)
         if call.resends >= options.retries || call.deadline <= now {
             settle(call, .failure(error))
             return
         }
-        if let key: String = movedKey {
+        if let key: String = options.reroute?(reply) {
             move(call, to: key)
             return
         }
@@ -415,14 +415,15 @@ public final class CentrifugeRpcPool {
 
 
     /// The server error of a failed answer, as the reroute hook sees it, or nil when the error is not a server reply.
-    /// The codes 15 to 17 are the client's own (unsupported headers, limit, cancel), so they are never a server reply.
+    /// Only codes from 100 up are server errors: the codes below are the client's own (unsupported headers, limit,
+    /// cancel), as the JS and Java SDKs also read them.
     private func serverReply(of error: Error) -> CentrifugeReplyError? {
         guard let known: CentrifugeError = error as? CentrifugeError else {
             return nil
         }
         switch known {
         case .replyError(let code, let message, let temporary):
-            if code >= rpcCodeUnsupported && code <= rpcCodeCancelled {
+            if code < rpcServerErrorFloor {
                 return nil
             }
             return CentrifugeReplyError(
@@ -486,15 +487,16 @@ public final class CentrifugeRpcPool {
 
     /// Waits the delay of a later resend, at the back of the line once it ends. The delay is uniform over
     /// `0 ... min(250 ms * 2^n, remaining deadline)`, drawn from the main client's random source, where n is the
-    /// number of resends the call has made. The caller has checked that the deadline is still ahead.
+    /// number of later resends the call has made so far. The caller has checked that the deadline is still ahead.
     private func waitForLaterResend(_ call: RpcPoolCall, now: UInt64) {
         let remaining: UInt64 = call.deadline - now
         let delay: UInt64 = fullJitterNanos(
             base: laterResendBaseNanos,
-            attempt: call.resends,
+            attempt: call.laterResends,
             cap: remaining,
             random: main.random
         )
+        call.laterResends += 1
         call.resends += 1
         call.connection = nil
         call.resendAt = now + delay
@@ -532,12 +534,11 @@ public final class CentrifugeRpcPool {
     /// Cancels a call. A waiting call leaves its line and fails at once. A call in flight fails at once too, and its
     /// connection still answers it, which releases its slot without a second completion.
     private func cancel(_ call: RpcPoolCall) {
-        let cancelled: CentrifugeError = CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false)
         if removeFromLine(call) || removeFromResendWaits(call) {
-            settle(call, .failure(cancelled))
+            settle(call, .failure(cancelledCallError()))
             drain(call.endpointKey)
         } else {
-            settle(call, .failure(cancelled))
+            settle(call, .failure(cancelledCallError()))
         }
         publishStats()
     }
@@ -745,8 +746,8 @@ public final class CentrifugeRpcPool {
     // MARK: - Timers, stats and close
 
     /// Keeps the deadline timer at the earliest moment that wakes the pool: the deadline of a waiting call, the end of
-    /// a hold while a call waits, or the end of a later resend's delay. Only moments still ahead count, so the timer
-    /// never re-arms for a past moment.
+    /// a hold while a call waits, or the end of a later resend's delay. A moment already past is kept too: the timer
+    /// then runs at once and moves the due calls on, so no due call is left waiting for another event.
     private func updateWaitTimer() {
         let now: UInt64 = main.clock.monotonicNanos()
         var earliest: UInt64? = nil
@@ -821,8 +822,10 @@ public final class CentrifugeRpcPool {
     }
 
 
+    /// The calls that wait for a slot: the lines, and the later resends that wait for their delay. Both count
+    /// toward `maxQueued`, so a parked resend takes the room of a waiting call.
     private func queuedCount() -> Int {
-        var total: Int = 0
+        var total: Int = resendWaits.count
         for line: [RpcPoolCall] in lines.values {
             total += line.count
         }
@@ -863,6 +866,8 @@ public final class CentrifugeRpcPool {
             endpoint.holdUntil = nil
             for conn: RpcPoolConnection in endpoint.connections {
                 conn.closed = true
+                // The lost calls of the connection are settled below with the rest; the connection keeps no reference.
+                conn.lostCalls = []
                 conn.idleItem?.cancel()
                 conn.idleItem = nil
                 conn.client.disconnect()
@@ -875,7 +880,7 @@ public final class CentrifugeRpcPool {
         resendWaits = []
         for call: RpcPoolCall in Array(unsettled.values) {
             if call.connection == nil {
-                settle(call, .failure(CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false)))
+                settle(call, .failure(cancelledCallError()))
             } else {
                 settle(call, .failure(CentrifugeError.connectionClosed))
             }

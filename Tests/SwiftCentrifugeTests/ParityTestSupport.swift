@@ -224,6 +224,25 @@ func lastNonLateTimerDelay(_ scheduler: ManualScheduler) -> TimeInterval? {
 }
 
 
+/// The reply of a server error, as the server sends it: the code, message, temporary flag and metadata of the error.
+/// The tracker and pool tests build their refusals with it.
+func rpcErrorReply(
+    code: UInt32,
+    message: String,
+    temporary: Bool = false,
+    metadata: [String: String] = [:]
+) -> RpcReply {
+    var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
+    error.code = code
+    error.message = message
+    error.temporary = temporary
+    error.metadata = metadata
+    var reply: RpcReply = RpcReply()
+    reply.error = error
+    return reply
+}
+
+
 /// A client together with the clock and the scheduler it was built with.
 struct ManualClientSetup {
     let client: CentrifugeClient

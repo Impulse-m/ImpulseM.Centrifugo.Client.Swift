@@ -59,7 +59,8 @@ public struct CentrifugeRpcPoolOptions {
 
     /// Maps a server error reply to an endpoint key. A reply that maps to a key moves the call to that key, at the
     /// front of its line, while `retries` and the call's deadline allow. Nil, or a nil result, means no move. The
-    /// hook runs on server error replies only, never on a lost call or a timeout.
+    /// hook runs on server error replies only, and only when a resend is possible (a resend left and the deadline
+    /// still ahead). It never runs on a lost call or a timeout.
     public var reroute: ((CentrifugeReplyError) -> String?)?
 
 

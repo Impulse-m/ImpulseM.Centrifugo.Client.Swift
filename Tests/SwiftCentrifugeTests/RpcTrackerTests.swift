@@ -601,13 +601,7 @@ final class RpcTrackerTests: @unchecked Sendable {
     // MARK: retry
 
     private func errorReply(code: UInt32, metadata: [String: String]) -> RpcReply {
-        var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
-        error.code = code
-        error.message = "refused"
-        error.metadata = metadata
-        var reply: RpcReply = RpcReply()
-        reply.error = error
-        return reply
+        return rpcErrorReply(code: code, message: "refused", metadata: metadata)
     }
 
 
