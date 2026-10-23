@@ -48,9 +48,10 @@ final class SubscriptionRefreshRetryTests: @unchecked Sendable {
 
     init() throws {
         server = FakeCentrifugoServer()
-        // The fake server never pings. A connect result without a ping interval arms no ping watchdog, so
-        // these tests do not depend on it. The cause of the earlier failure (seen in CI, not reproduced
-        // locally) is not identified; this setting only removes the watchdog from the retry suite.
+        // The fake server never sends a ping, and these tests move the manual clock past the default ping window
+        // (25 s ping plus the server ping delay). With ping set, the watchdog would close the connection on that clock
+        // and no reply would arrive, so the suite arms no watchdog. Other suites keep the default connect result.
+        // The earlier CI failure that prompted this was not reproduced locally, so this is the only claim made here.
         server.connectResult.ping = 0
         // The subscription token expires after 10 seconds, so the refresh is armed on the manual clock.
         server.onSubscribe = { _, _ in
@@ -199,6 +200,13 @@ final class SubscriptionRefreshRetryTests: @unchecked Sendable {
             }
         }
         server.onCommand = { (command: FakeCentrifugoServer.PCommand) -> FakeCentrifugoServer.PReply? in
+            // The sentinel of the test is a client refresh, which the server accepts.
+            if command.hasRefresh && !command.hasSubRefresh {
+                var accepted: FakeCentrifugoServer.PReply = FakeCentrifugoServer.PReply()
+                accepted.id = command.id
+                accepted.refresh = Centrifugal_Centrifuge_Protocol_RefreshResult()
+                return accepted
+            }
             guard command.hasSubRefresh else {
                 return nil
             }
@@ -220,8 +228,15 @@ final class SubscriptionRefreshRetryTests: @unchecked Sendable {
         // Two fetches in all: the first and the retry. The retry's token is the refused one, so it is not sent.
         await fetches.awaitCount(times: 2)
         await awaitSyncQueue(setup.client)
-        #expect(server.received().filter(\.hasSubRefresh).count == 1)
         #expect(nonLateTimerCount(setup.scheduler) == armedAfterRefusal)
+        // A resend would be written on the connection in the retry's decision and would reach the fake server later.
+        // A client refresh, answered by the server, orders after it: the connection is one ordered stream.
+        let sentinel: Expectation = Expectation("sentinel refresh answered")
+        setup.client.refresh(token: "sentinel-token") { (_: Result<CentrifugeRefreshResult, Error>) -> Void in
+            sentinel.fulfill()
+        }
+        await fulfillment(of: [sentinel], within: 5)
+        #expect(server.received().filter(\.hasSubRefresh).count == 1, "the refused token is not sent again")
         withExtendedLifetime(clientDelegate) {}
     }
 

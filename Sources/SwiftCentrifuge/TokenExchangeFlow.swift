@@ -9,9 +9,9 @@ import Foundation
 // Everything here runs on syncQueue. The application's load, store and exchange complete on any thread, and each
 // completion hops back to syncQueue before it touches the state. A callback of a stale attempt (its connection
 // is gone, or it timed out) changes no run and ends no session: its refresh token rotation is still stored, as long
-// as the client is alive. The completions hold the client weakly, so a client released while an exchange is in
-// flight loses that rotation: the issuer has consumed the old refresh token and the new one is never stored, and the
-// session is lost at the next launch. An application keeps its client alive until its sign-in exchanges have ended.
+// as the client is alive. The exchange completions hold the client strongly, so a client released while an exchange
+// is in flight still stores the rotation: the issuer has consumed the old refresh token, and a lost rotation would end
+// the session at the next launch. The completion is called once by the application, so the reference ends with it.
 
 /// The bounds of the retry of a failed bootstrap step, in seconds. The delay is the Java formula of the backoff:
 /// min(maximum, minimum + uniform[0, min(maximum, minimum * 2^step)]).
@@ -246,17 +246,16 @@ internal extension CentrifugeClient {
             refreshToken: refreshToken,
             refusalTypes: exchange.refusalTypes
         )
-        exchange.exchange(event, completion: { [weak self] (result: Result<CentrifugeTokenExchangeResult, Error>) in
-            guard let strongSelf: CentrifugeClient = self else {
-                return
-            }
-            strongSelf.syncQueue.async {
+        // The completion holds the client strongly: a client released during the exchange would drop the rotated refresh
+        // token after the issuer consumed the old one. The application calls the completion once, so no cycle persists.
+        exchange.exchange(event, completion: { [self] (result: Result<CentrifugeTokenExchangeResult, Error>) in
+            self.syncQueue.async {
                 guard once.claim() else {
-                    strongSelf.storeAbandonedRotation(result, used: refreshToken)
+                    self.storeAbandonedRotation(result, used: refreshToken)
                     return
                 }
                 deadline.cancel()
-                strongSelf.onBootstrapExchanged(transportId: transportId, refreshToken: refreshToken, result: result)
+                self.onBootstrapExchanged(transportId: transportId, refreshToken: refreshToken, result: result)
             }
         })
     }
@@ -344,7 +343,7 @@ internal extension CentrifugeClient {
     func refreshBootstrap(transportId: UInt64, accessToken: String) {
         self.token = accessToken
         tokenExchangeState.bootstrap?.tokenSet = true
-        sendRefresh(token: accessToken, completion: { [weak self] (result: Centrifugal_Centrifuge_Protocol_RefreshResult?, error: Error?) in
+        sendRefreshCommand(token: accessToken, completion: { [weak self] (result: Centrifugal_Centrifuge_Protocol_RefreshResult?, error: Error?) in
             guard let strongSelf: CentrifugeClient = self, strongSelf.isCurrentBootstrap(transportId) else {
                 return
             }
@@ -550,17 +549,15 @@ internal extension CentrifugeClient {
             refreshToken: refreshToken,
             refusalTypes: exchange.refusalTypes
         )
-        exchange.exchange(event, completion: { [weak self] (result: Result<CentrifugeTokenExchangeResult, Error>) in
-            guard let strongSelf: CentrifugeClient = self else {
-                return
-            }
-            strongSelf.syncQueue.async {
+        // Strong, as in runBootstrapExchange: the rotation of a released client is still stored.
+        exchange.exchange(event, completion: { [self] (result: Result<CentrifugeTokenExchangeResult, Error>) in
+            self.syncQueue.async {
                 guard once.claim() else {
-                    strongSelf.storeAbandonedRotation(result, used: refreshToken)
+                    self.storeAbandonedRotation(result, used: refreshToken)
                     return
                 }
                 deadline.cancel()
-                strongSelf.onRenewalExchanged(transportId: transportId, refreshToken: refreshToken, result: result, completion: completion)
+                self.onRenewalExchanged(transportId: transportId, refreshToken: refreshToken, result: result, completion: completion)
             }
         })
     }
@@ -664,12 +661,7 @@ internal extension CentrifugeClient {
                 completion(.failure(CentrifugeError.connectionClosed))
                 return
             }
-            var request: Centrifugal_Centrifuge_Protocol_RPCRequest = Centrifugal_Centrifuge_Protocol_RPCRequest()
-            request.method = method
-            request.data = data
-            var command: Centrifugal_Centrifuge_Protocol_Command = Centrifugal_Centrifuge_Protocol_Command()
-            command.id = strongSelf.nextCommandId()
-            command.rpc = request
+            let command: Centrifugal_Centrifuge_Protocol_Command = makeRpcCommand(id: strongSelf.nextCommandId(), method: method, data: data)
             strongSelf.sendCommand(command: command, completion: { (reply: Centrifugal_Centrifuge_Protocol_Reply?, error: Error?) in
                 if let failure: Error = error {
                     completion(.failure(failure))

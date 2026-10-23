@@ -554,10 +554,97 @@ final class RefreshTests: @unchecked Sendable {
     }
 
 
+    /// Refresh commands go out one at a time (contract 4.3): a refresh() call admitted while a timer refresh command is
+    /// in flight is sent only after that command has ended.
+    @Test func explicitRefreshWaitsForAnInFlightTimerCommand() async {
+        let dropped: Expectation = Expectation("timer refresh arrived")
+        let answered: Expectation = Expectation("explicit refresh answered")
+        let explicitDone: Expectation = Expectation("explicit refresh completed")
+        server.dropCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Bool in
+            guard command.hasRefresh, command.refresh.token == "T1" else {
+                return false
+            }
+            dropped.fulfill()
+            return true
+        }
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            guard command.hasRefresh else {
+                return nil
+            }
+            answered.fulfill()
+            return acceptedReply(to: command)
+        }
+        let config: CentrifugeClientConfig = tokenConfig(tokenSequence(["T1"]))
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: 10)
+        // The timer refresh is sent with T1 and its reply never comes.
+        await setup.scheduler.advance(by: 10)
+        await fulfillment(of: [dropped], within: 5)
+        await awaitSyncQueue(setup.client)
+
+        // The explicit call is admitted while that command is in flight: it waits and sends nothing.
+        setup.client.refresh(token: "E1") { (_: Result<CentrifugeRefreshResult, Error>) -> Void in
+            explicitDone.fulfill()
+        }
+        await awaitSyncQueue(setup.client)
+        #expect(!refreshTokens().contains("E1"), "the explicit refresh does not overlap the timer command")
+
+        // The timer command times out; its end sends the explicit refresh, which the server accepts.
+        server.dropCommand = nil
+        await setup.scheduler.advance(by: config.timeout)
+        await fulfillment(of: [answered, explicitDone], within: 5)
+        #expect(refreshTokens().last == "E1")
+        withExtendedLifetime(delegate) {}
+    }
+
+
+    /// rpc() waits while a refresh command is in flight (contract 4.3, table T2): the call is written after the
+    /// command has ended.
+    @Test func rpcWaitsWhileARefreshCommandIsInFlight() async {
+        let dropped: Expectation = Expectation("timer refresh arrived")
+        let rpcArrived: Expectation = Expectation("rpc arrived")
+        server.dropCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Bool in
+            guard command.hasRefresh else {
+                return false
+            }
+            dropped.fulfill()
+            return true
+        }
+        server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
+            if command.hasRpc {
+                rpcArrived.fulfill()
+                return nil
+            }
+            return nil
+        }
+        let config: CentrifugeClientConfig = tokenConfig(tokenSequence(["T1"]))
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: 10)
+        await setup.scheduler.advance(by: 10)
+        await fulfillment(of: [dropped], within: 5)
+        await awaitSyncQueue(setup.client)
+
+        setup.client.rpc(method: "m", data: Data()) { (_: Result<CentrifugeRpcResult, Error>) -> Void in
+        }
+        await awaitSyncQueue(setup.client)
+        #expect(!server.received().contains(where: \.hasRpc), "the rpc waits for the refresh command")
+
+        // The timer command ends by its timeout: the waiting rpc is written then.
+        server.dropCommand = nil
+        await setup.scheduler.advance(by: config.timeout)
+        await fulfillment(of: [rpcArrived], within: 5)
+        withExtendedLifetime(delegate) {}
+    }
+
+
     @Test func refusedTokenIsNotSentAgainWithStopOnRefusedToken() async {
         server.onCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Centrifugal_Centrifuge_Protocol_Reply? in
             guard command.hasRefresh else {
                 return nil
+            }
+            // The sentinel token is accepted; the refused token gets 109.
+            if command.refresh.token == "T2" {
+                return acceptedReply(to: command)
             }
             return errorReply(to: command, code: 109, temporary: false)
         }
@@ -586,10 +673,18 @@ final class RefreshTests: @unchecked Sendable {
         let armedBeforeRetry: Int = nonLateTimerCount(setup.scheduler)
         await setup.scheduler.advance(by: 10)
         await fulfillment(of: [refetched], within: 5)
-        // The fetch ran and its decision is on the queue before this block: the refused token was not sent.
+        // The fetch ran and its decision is on the queue before this block. A resend would be written on the connection
+        // in that decision and would reach the fake server after this point, so a sentinel orders after it: an explicit
+        // refresh with another token, which the server accepts. The connection is one ordered stream, so when the sentinel
+        // has been answered, every command written before it has been received.
         await awaitSyncQueue(setup.client)
-        #expect(refreshTokens() == ["T1"])
         #expect(nonLateTimerCount(setup.scheduler) == armedBeforeRetry)
+        let sentinel: Expectation = Expectation("sentinel refresh answered")
+        setup.client.refresh(token: "T2") { (_: Result<CentrifugeRefreshResult, Error>) -> Void in
+            sentinel.fulfill()
+        }
+        await fulfillment(of: [sentinel], within: 5)
+        #expect(refreshTokens() == ["T1", "T2"], "the refused token is not sent again")
 
         // The skipped token leaves the refresh required: the next connect fetches a token from the getter.
         let disconnected: Expectation = Expectation("disconnected")

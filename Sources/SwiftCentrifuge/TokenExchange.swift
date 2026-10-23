@@ -150,7 +150,11 @@ internal struct TokenExchangeFailure: Error, CustomStringConvertible {
     internal let underlying: Error?
 
 
+    /// The message, and the cause of a store or load failure when the application gave one.
     internal var description: String {
-        return message
+        guard let cause: Error = underlying else {
+            return message
+        }
+        return "\(message): \(cause)"
     }
 }

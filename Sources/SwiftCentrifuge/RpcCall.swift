@@ -4,6 +4,19 @@ import Foundation
 // call, and the error payload of a server error that carries application fields. The call logic is
 // in RpcTracker.swift.
 
+/// The command of a plain rpc request with a command id. The token exchange and the tracker build their rpc
+/// commands here, so the shape is written once.
+internal func makeRpcCommand(id: UInt32, method: String, data: Data) -> Centrifugal_Centrifuge_Protocol_Command {
+    var request: Centrifugal_Centrifuge_Protocol_RPCRequest = Centrifugal_Centrifuge_Protocol_RPCRequest()
+    request.method = method
+    request.data = data
+    var command: Centrifugal_Centrifuge_Protocol_Command = Centrifugal_Centrifuge_Protocol_Command()
+    command.id = id
+    command.rpc = request
+    return command
+}
+
+
 /// Options of one `rpc` call.
 public struct CentrifugeRpcOptions {
     /// Headers sent with the call. A connection that does not confirm the RPC options cannot carry

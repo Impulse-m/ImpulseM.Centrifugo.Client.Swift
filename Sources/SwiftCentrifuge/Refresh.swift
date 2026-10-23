@@ -52,6 +52,8 @@ internal final class RefreshCall {
     // Whether the call was admitted while a timer token fetch was in flight. Its failure then arms the retry of
     // that timer refresh, which the fetch no longer does.
     internal var supersedesTimer: Bool = false
+    // Whether a call without a token waits for the connection before its token exchange starts (token exchange only).
+    internal var awaitsConnection: Bool = false
 
 
     internal init(token: String?, completion: @escaping (Result<CentrifugeRefreshResult, Error>) -> Void) {
@@ -73,6 +75,10 @@ internal final class RefreshState {
     internal var generation: UInt64 = 0
     // Whether a token fetch of a timer refresh is in flight.
     internal var timerFetchInFlight: Bool = false
+    // Whether a refresh command is on the wire, of either kind: a refresh() call or a timer refresh. Refresh
+    // commands go out one at a time, and rpc calls wait while one is in flight (contract 4.3). Cleared by the
+    // command's completion, which the transport loss fails too.
+    internal var commandInFlight: Bool = false
     // The consecutive failed timer refreshes of the connection: the step of the next retry.
     internal var failures: Int = 0
     // The token the server refused as expired, for the stopOnRefusedToken rule.
@@ -142,6 +148,12 @@ internal extension CentrifugeClient {
             return
         }
         guard let token: String = call.token else {
+            // A token exchange renews over the connection, so a call without a token waits for the connection, as a
+            // call with a token-getter fetch does (the fetch is sent on the next connect).
+            if self.state != .connected && self.config.tokenExchange != nil {
+                call.awaitsConnection = true
+                return
+            }
             fetchRefreshToken(for: call)
             return
         }
@@ -166,14 +178,49 @@ internal extension CentrifugeClient {
     }
 
 
+    /// Whether a refresh() call is in progress or a refresh command is in flight. rpc calls wait meanwhile.
+    var refreshBusy: Bool {
+        return !refreshState.calls.isEmpty || refreshState.commandInFlight
+    }
+
+
+    /// Sends a refresh command of either kind and marks it in flight until its completion. Every refresh command goes
+    /// through here, so two of them never overlap on the wire.
+    func sendRefreshCommand(token: String, completion: @escaping (Centrifugal_Centrifuge_Protocol_RefreshResult?, Error?) -> ()) {
+        refreshState.commandInFlight = true
+        sendRefresh(token: token, completion: { [weak self] result, error in
+            guard let strongSelf: CentrifugeClient = self else {
+                return
+            }
+            strongSelf.refreshState.commandInFlight = false
+            completion(result, error)
+            strongSelf.refreshIdleChanged()
+        })
+    }
+
+
+    /// Runs after a refresh command settles or a call finishes. A waiting call sends its command now, when the
+    /// connection is up and no command is in flight; then the rpc calls that waited for the refresh state go out.
+    func refreshIdleChanged() {
+        if let call: RefreshCall = refreshState.calls.first, !refreshState.commandInFlight, self.state == .connected,
+           let token: String = call.waitingToken {
+            sendRefreshCall(call, token: token)
+        }
+        if !refreshBusy {
+            rpcTracker.onRefreshIdle()
+        }
+    }
+
+
     /// Sends the refresh command of a call, or waits for the connection to send it. A call that waits puts its token
-    /// on the client now, so the next connect carries it; the command follows that connect.
+    /// on the client now, so the next connect carries it; the command follows that connect, or the settled command in
+    /// flight (refreshIdleChanged).
     func sendRefreshCall(_ call: RefreshCall, token: String) {
         if token.isEmpty {
             finishRefreshCall(call, outcome: .failure(CentrifugeError.configurationError(message: "refresh token is empty")))
             return
         }
-        guard self.state == .connected else {
+        guard self.state == .connected, !refreshState.commandInFlight else {
             if !call.holdsToken {
                 call.previousToken = self.token
                 call.holdsToken = true
@@ -184,7 +231,7 @@ internal extension CentrifugeClient {
             return
         }
         call.waitingToken = nil
-        sendRefresh(token: token, completion: { [weak self] result, error in
+        sendRefreshCommand(token: token, completion: { [weak self] result, error in
             guard let strongSelf: CentrifugeClient = self, strongSelf.refreshState.calls.first === call else {
                 return
             }
@@ -228,6 +275,7 @@ internal extension CentrifugeClient {
             refreshState.running = true
             runFirstRefreshCall()
         }
+        refreshIdleChanged()
     }
 
 
@@ -235,7 +283,15 @@ internal extension CentrifugeClient {
     /// waits for the connection sends its command.
     func refreshConnected() {
         refreshState.failures = 0
-        guard let call: RefreshCall = refreshState.calls.first, let token: String = call.waitingToken else {
+        guard let call: RefreshCall = refreshState.calls.first else {
+            return
+        }
+        if call.awaitsConnection {
+            call.awaitsConnection = false
+            fetchRefreshToken(for: call)
+            return
+        }
+        guard let token: String = call.waitingToken else {
             return
         }
         sendRefreshCall(call, token: token)
@@ -304,6 +360,12 @@ internal extension CentrifugeClient {
                 strongSelf.endTimerFetch()
                 // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
                 guard strongSelf.isCurrentConnection(transportId), !strongSelf.timerFetchIsSuperseded(generation) else { return }
+                // A refresh() call or a refresh command in flight goes first (refreshBusy): this fetch is not sent, and
+                // the chain tries again after the retry delay, so it does not end.
+                if strongSelf.refreshBusy {
+                    strongSelf.scheduleTimerRefreshRetry()
+                    return
+                }
                 switch result {
                 case .success(let token):
                     if token == "" {

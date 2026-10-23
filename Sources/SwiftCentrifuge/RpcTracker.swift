@@ -193,7 +193,7 @@ internal final class RpcTracker {
         slot.call = call
         self.calls[call.seq] = call
         self.dues.push(RpcDue(nanos: deadline, seq: call.seq, resend: false))
-        if self.connected {
+        if self.connected && !client.refreshBusy {
             self.writeCall(call)
         }
         self.armTimer()
@@ -214,10 +214,11 @@ internal final class RpcTracker {
     }
 
 
-    /// The client's connection is confirmed: flushes the pending cancels and the waiting calls.
+    /// The client's connection is confirmed: flushes the pending cancels and the waiting calls. The calls wait
+    /// while a refresh() call or a refresh command is in flight (contract 4.3); onRefreshIdle writes them then.
     /// `capable` is whether the server confirmed the RPC options.
     internal func onConnected(capable: Bool) {
-        guard self.client != nil else {
+        guard let client: CentrifugeClient = self.client else {
             return
         }
         self.connected = true
@@ -228,6 +229,21 @@ internal final class RpcTracker {
             for msgID: UInt64 in cancels {
                 self.sendCancel(msgID)
             }
+        }
+        if !client.refreshBusy {
+            for call: TrackedRpc in self.queuedInWriteOrder() {
+                self.writeCall(call)
+            }
+        }
+        self.armTimer()
+    }
+
+
+    /// The refresh state went idle: a refresh() call and every refresh command are settled. The calls that waited
+    /// for it are written now, when the connection is confirmed.
+    internal func onRefreshIdle() {
+        guard let client: CentrifugeClient = self.client, self.connected, !client.refreshBusy else {
+            return
         }
         for call: TrackedRpc in self.queuedInWriteOrder() {
             self.writeCall(call)
