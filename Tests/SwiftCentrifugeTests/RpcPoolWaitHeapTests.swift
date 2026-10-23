@@ -230,8 +230,9 @@ final class RpcPoolWaitHeapTests: @unchecked Sendable {
         let (pool, holding): (CentrifugeRpcPool, CentrifugeRpcCall) = await startFullPool(main)
         let fired: LockedBox<[String]> = LockedBox<[String]>([])
 
-        // One call waits for a long time. Each later call is cancelled at once, so each leaves an entry behind.
-        admitWaiting(pool, "long", timeout: 60, log: fired)
+        // One call waits for a long time (4 s, the most a call may ask of the pool's 5 s timeout). Each later call is
+        // cancelled at once, so each leaves an entry behind. The clock does not move, so the long call stays waiting.
+        admitWaiting(pool, "long", timeout: 4.0, log: fired)
         for index: Int in 0 ..< 200 {
             let call: CentrifugeRpcCall = admitWaiting(pool, "\(index)", timeout: waitDeadline(index), log: fired)
             call.cancel()
