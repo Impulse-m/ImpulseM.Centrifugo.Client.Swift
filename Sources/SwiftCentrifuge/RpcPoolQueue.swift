@@ -4,6 +4,19 @@ import Foundation
 // until a connection has a free slot, then it holds that slot until the connection answers it. The line itself is
 // an array in the pool (RpcPool.swift), bounded by `maxQueued`. The fields are read and written on the pool's queue.
 
+/// Where a pool call waits, as the pool's wait timer reads it. A timer entry of a call stands only in the state that set it.
+internal enum RpcPoolWait {
+    /// Not waiting for the timer: placed on a connection, or not admitted yet.
+    case idle
+    /// In the line of its key: its deadline is the timer's.
+    case line
+    /// In the resend waits: its resend time is the timer's.
+    case resendWait
+    /// Running or waiting for a redirect fetch: its deadline is the timer's.
+    case fetch
+}
+
+
 /// One pool call. Its completion runs once, on the pool's queue.
 internal final class RpcPoolCall {
     /// The endpoint key the call waits under. A call that the reroute hook moves takes the new key.
@@ -42,6 +55,9 @@ internal final class RpcPoolCall {
 
     /// The monotonic moment a later resend of the call is due. Set while the call waits in the resend wait list.
     internal var resendAt: UInt64 = 0
+
+    /// Where the call waits, for the pool's wait timer (RpcPool.swift, setWait).
+    internal var wait: RpcPoolWait = .idle
 
     /// The identity generation the call is bound to at admission. A pool with `tokenFrom` fails a waiting call whose
     /// generation the main client has left (identity changed). Zero for a pool without `tokenFrom`.
