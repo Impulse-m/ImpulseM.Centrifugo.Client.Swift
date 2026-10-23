@@ -82,7 +82,7 @@ internal final class DispatchClientScheduler: ClientScheduler {
                 return
             }
             let now: UInt64 = strongSelf.clock.monotonicNanos()
-            let late: Double = now > deadlineNanos ? Double(now - deadlineNanos) / 1e9 : 0
+            let late: Double = now > deadlineNanos ? clientSeconds(nanos: now - deadlineNanos) : 0
             if late > lateTimerGrace {
                 strongSelf.queue.asyncAfter(deadline: .now() + lateTimerGrace, execute: item)
             } else {
@@ -102,6 +102,11 @@ internal func clientNanos(_ delay: TimeInterval) -> UInt64 {
     }
     let seconds: Double = min(delay, 9e9)
     return UInt64(seconds * 1e9)
+}
+
+/// Seconds of a duration in nanoseconds, the inverse of clientNanos.
+internal func clientSeconds(nanos: UInt64) -> TimeInterval {
+    return Double(nanos) / 1e9
 }
 
 extension CentrifugeClient {

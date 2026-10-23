@@ -11,38 +11,7 @@ import Testing
 /// A connected client on the manual clock, with the delegate that records its events.
 private struct WatchdogConnection {
     let setup: ManualClientSetup
-    let delegate: WatchdogDelegate
-}
-
-
-/// Counts the messages (pushes) and the connecting events, with their codes, of one client.
-private final class WatchdogDelegate: CentrifugeClientDelegate, @unchecked Sendable {
-    let connected: Expectation = Expectation("connected")
-    let pushes: EventCounter = EventCounter()
-    private let connectingCodes: LockedBox<[UInt32]> = LockedBox([])
-
-
-    /// The codes of the connecting events so far, in order.
-    var codes: [UInt32] {
-        return connectingCodes.current
-    }
-
-
-    func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
-        connected.fulfill()
-    }
-
-
-    func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {
-        connectingCodes.update { (values: inout [UInt32]) in
-            values.append(event.code)
-        }
-    }
-
-
-    func onMessage(_ client: CentrifugeClient, _ event: CentrifugeMessageEvent) {
-        pushes.record()
-    }
+    let delegate: RecordingClientDelegate
 }
 
 
@@ -97,7 +66,7 @@ final class PingWatchdogTests: @unchecked Sendable {
     /// reply has armed the watchdog: the queue is drained, so the arming is in place.
     private func connectedClient(pong: Bool) async -> WatchdogConnection {
         fake.server.connectResult = connectResult(pong: pong)
-        let delegate: WatchdogDelegate = WatchdogDelegate()
+        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(
             endpoint: fake.server.url,
             config: watchdogConfig(),
@@ -116,20 +85,20 @@ final class PingWatchdogTests: @unchecked Sendable {
     @Test func pingWatchdogRestartsOnAnyReply() async {
         let connection: WatchdogConnection = await connectedClient(pong: false)
         let setup: ManualClientSetup = connection.setup
-        let delegate: WatchdogDelegate = connection.delegate
+        let delegate: RecordingClientDelegate = connection.delegate
         // The connect reply armed the watchdog at t0, due at t0 + 10 s.
         await setup.scheduler.advance(by: 9)
         fake.server.sendPush(messagePush())
-        await awaitPushArrival(delegate.pushes, count: 1)
+        await delegate.messages.awaitPushArrival(count: 1)
         // The timer fires at t0 + 10 s. The push was 1 s ago, so the timer re-arms for 9 s: due at t0 + 19 s.
         await setup.scheduler.advance(by: 1)
         #expect(setup.client.state == .connected)
         await setup.scheduler.advance(by: 8.5)
         #expect(setup.client.state == .connected)
-        #expect(!delegate.codes.contains(connectingCodeNoPing))
+        #expect(!delegate.connectingCodesSoFar.contains(connectingCodeNoPing))
         // At t0 + 19 s the connection has been silent for one full window after the push.
         await setup.scheduler.advance(by: 0.5)
-        #expect(delegate.codes.contains(connectingCodeNoPing))
+        #expect(delegate.connectingCodesSoFar.contains(connectingCodeNoPing))
         withExtendedLifetime(delegate) {}
     }
 
@@ -138,7 +107,7 @@ final class PingWatchdogTests: @unchecked Sendable {
     @Test func silenceAfterAnyReplyClosesWithinOneWindow() async {
         let connection: WatchdogConnection = await connectedClient(pong: true)
         let setup: ManualClientSetup = connection.setup
-        let delegate: WatchdogDelegate = connection.delegate
+        let delegate: RecordingClientDelegate = connection.delegate
         await setup.scheduler.advance(by: 4)
         // The server ping is the last reply, at t0 + 4 s. The pong it gets back is the sync point.
         fake.server.sendReply(FakeCentrifugoServer.PReply())
@@ -152,7 +121,7 @@ final class PingWatchdogTests: @unchecked Sendable {
         #expect(setup.client.state == .connected)
         // One window after the ping, at t0 + 14 s, the connection closes with no ping.
         await setup.scheduler.advance(by: 0.5)
-        #expect(delegate.codes.contains(connectingCodeNoPing))
+        #expect(delegate.connectingCodesSoFar.contains(connectingCodeNoPing))
         withExtendedLifetime(delegate) {}
     }
 
@@ -161,7 +130,7 @@ final class PingWatchdogTests: @unchecked Sendable {
     @Test func serverPingStillGetsItsPong() async {
         let connection: WatchdogConnection = await connectedClient(pong: true)
         let setup: ManualClientSetup = connection.setup
-        let delegate: WatchdogDelegate = connection.delegate
+        let delegate: RecordingClientDelegate = connection.delegate
         fake.server.sendReply(FakeCentrifugoServer.PReply())
         await fake.awaitArrivals("pong", { (command: RpcCommand) -> Bool in
             return self.isPong(command)
@@ -176,15 +145,17 @@ final class PingWatchdogTests: @unchecked Sendable {
 
 
     /// A thousand reply batches arm no timer: the watchdog's one timer is the only one, armed at connect.
+    /// This counts the scheduler calls made while the batches arrive. It is the zero-timer assertion of the
+    /// F11 benchmark, not a rate or allocation measurement.
     @Test func replyBatchesCreateNoTimer() async {
         let connection: WatchdogConnection = await connectedClient(pong: false)
         let setup: ManualClientSetup = connection.setup
-        let delegate: WatchdogDelegate = connection.delegate
+        let delegate: RecordingClientDelegate = connection.delegate
         let armedAtConnect: Int = setup.scheduler.scheduledCalls.count
         for _ in 0 ..< 1000 {
             fake.server.sendPush(messagePush())
         }
-        await awaitPushArrival(delegate.pushes, count: 1000)
+        await delegate.messages.awaitPushArrival(count: 1000)
         #expect(setup.scheduler.scheduledCalls.count == armedAtConnect)
         withExtendedLifetime(delegate) {}
     }

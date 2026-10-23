@@ -311,11 +311,12 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
     fileprivate var refreshRequired: Bool = false
-    fileprivate var pingTimer: DispatchWorkItem?
-    fileprivate var pingInterval: UInt32 = 0
+    // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
+    internal var pingTimer: DispatchWorkItem?
+    internal var pingInterval: UInt32 = 0
     fileprivate var sendPong: Bool = false
     // The ping watchdog (F11): the clock time of the last decoded batch that carried a reply.
-    fileprivate var lastReplyNanos: UInt64 = 0
+    internal var lastReplyNanos: UInt64 = 0
     fileprivate var reconnectTask: DispatchWorkItem?
     fileprivate var log: CentrifugeLogger
 
@@ -1342,33 +1343,6 @@ fileprivate extension CentrifugeClient {
         self.lastReplyNanos = self.clock.monotonicNanos()
         self.armPingTimer(transportId: self.transportId, after: self.pingWindowSeconds())
     }
-
-    private func armPingTimer(transportId: UInt64, after delay: TimeInterval) {
-        let pingTimer = DispatchWorkItem { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.pingTimerFired(transportId: transportId)
-        }
-        self.pingTimer = pingTimer
-        self.scheduleTimeout(after: delay, pingTimer)
-    }
-
-    // Fires once per window at most. A reply since the timer was armed moves the check to one
-    // window after that reply; otherwise the connection has been silent for a whole window.
-    private func pingTimerFired(transportId: UInt64) {
-        guard self.isCurrentConnection(transportId) else { return }
-        let window: UInt64 = clientNanos(self.pingWindowSeconds())
-        let now: UInt64 = self.clock.monotonicNanos()
-        let silent: UInt64 = now > self.lastReplyNanos ? now - self.lastReplyNanos : 0
-        if silent < window {
-            self.armPingTimer(transportId: transportId, after: Double(window - silent) / 1e9)
-            return
-        }
-        self.processDisconnect(code: connectingCodeNoPing, reason: "no ping", reconnect: true)
-    }
-
-    private func pingWindowSeconds() -> TimeInterval {
-        return Double(self.pingInterval) + self.config.maxServerPingDelay
-    }
     
     private func stopWaitPing() {
         self.pingTimer?.cancel()
@@ -1446,14 +1420,15 @@ internal extension CentrifugeClient {
 }
 
 
-fileprivate extension CentrifugeClient {
+// The ping watchdog reaches processDisconnect from Client+PingWatchdog.swift, so this extension is internal.
+internal extension CentrifugeClient {
     private func stopReconnect() {
         self.reconnectTask?.cancel()
         self.reconnectTask = nil
     }
     
     // Caller must synchronize access.
-    private func processDisconnect(code: UInt32, reason: String, reconnect: Bool) {
+    func processDisconnect(code: UInt32, reason: String, reconnect: Bool) {
         assertIsOnQueue(syncQueue)
         if self.state == .disconnected {
             return

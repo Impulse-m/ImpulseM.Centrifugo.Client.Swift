@@ -36,13 +36,26 @@ final class EventCounter: @unchecked Sendable {
 }
 
 
+extension EventCounter {
+    /// Suspends until the client has handled the `count`-th push, which the delegate counts in
+    /// onMessage. That callback runs after the push's frame was decoded, so it is the sync point before a
+    /// test moves the clock past the push (the timers of the client see the push first).
+    func awaitPushArrival(count: Int) async {
+        await awaitCount(times: count)
+    }
+}
+
+
 /// Records the events the parity tests check. The callbacks run on the client's queue; the lists
 /// are guarded so that the test thread can read them.
 final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendable {
     /// Fulfilled by every `onConnected`.
     let connected: Expectation
+    /// Counts every `onMessage`, so a test can wait for the pushes it sends.
+    let messages: EventCounter = EventCounter()
     private let authEvents: LockedBox<[CentrifugeAuthEvent]> = LockedBox([])
     private let errors: LockedBox<[Error]> = LockedBox([])
+    private let connectingCodes: LockedBox<[UInt32]> = LockedBox([])
     private let connectedCounter: EventCounter = EventCounter()
     private let connectingCounter: EventCounter = EventCounter()
     /// Fulfilled by every `onMessage`, when one was given.
@@ -74,6 +87,12 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
     }
 
 
+    /// The codes of the connecting events so far, in order.
+    var connectingCodesSoFar: [UInt32] {
+        return connectingCodes.current
+    }
+
+
     /// Every identity event so far, in order.
     var authEventsSoFar: [CentrifugeAuthEvent] {
         return authEvents.current
@@ -102,6 +121,9 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
 
     func onConnecting(_ client: CentrifugeClient, _ event: CentrifugeConnectingEvent) {
         connectingCounter.record()
+        connectingCodes.update { (values: inout [UInt32]) in
+            values.append(event.code)
+        }
     }
 
 
@@ -113,6 +135,7 @@ final class RecordingClientDelegate: CentrifugeClientDelegate, @unchecked Sendab
 
 
     func onMessage(_ client: CentrifugeClient, _ event: CentrifugeMessageEvent) {
+        messages.record()
         messageArrived?.fulfill()
     }
 

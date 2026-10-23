@@ -48,9 +48,9 @@ final class SubscriptionRefreshRetryTests: @unchecked Sendable {
 
     init() throws {
         server = FakeCentrifugoServer()
-        // The fake server never pings. Its connect result gives no ping interval, so the client arms no ping
-        // watchdog; the default interval (25 s plus the 10 s server ping delay) would drop the connection on
-        // the manual clock, as the retry tests advance well past it.
+        // The fake server never pings. A connect result without a ping interval arms no ping watchdog, so
+        // these tests do not depend on it. The cause of the earlier failure (seen in CI, not reproduced
+        // locally) is not identified; this setting only removes the watchdog from the retry suite.
         server.connectResult.ping = 0
         // The subscription token expires after 10 seconds, so the refresh is armed on the manual clock.
         server.onSubscribe = { _, _ in
