@@ -111,7 +111,8 @@ internal extension CentrifugeClient {
     /// when that call has the same token or none, and otherwise waits behind the calls in progress.
     func admitRefresh(token: String?, completion: @escaping (Result<CentrifugeRefreshResult, Error>) -> Void) {
         assertIsOnQueue(syncQueue)
-        if token == nil && config.tokenGetter == nil {
+        // A call without a token fetches one from the token getter, or exchanges the stored refresh token.
+        if token == nil && config.tokenGetter == nil && config.tokenExchange == nil {
             completion(.failure(CentrifugeError.configurationError(message: "refresh needs a token: pass one to refresh() or set getToken")))
             return
         }
@@ -269,11 +270,14 @@ internal extension CentrifugeClient {
     func acceptRefreshReply(_ res: Centrifugal_Centrifuge_Protocol_RefreshResult) {
         refreshState.failures = 0
         refreshState.refusedToken = nil
+        observeTokenExpiry(expires: res.expires, ttl: res.ttl)
+        // The server accepted the token: an open refusal run of the token exchange is over.
+        closeRefusalRun()
         if identity.applyRefresh(user: res.user, authClass: res.authClass) {
             delegate?.onAuth(self, CentrifugeAuthEvent(user: identity.user, authClass: identity.authClass))
         }
         if res.expires {
-            startConnectionRefresh(after: Double(res.ttl))
+            startConnectionRefresh(after: connectionRenewalDelay(ttl: res.ttl))
         } else {
             stopConnectionRefresh()
         }

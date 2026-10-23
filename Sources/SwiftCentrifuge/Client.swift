@@ -95,7 +95,8 @@ public struct CentrifugeClientConfig {
         instance: String? = nil,
         maxPendingRpc: Int = 32,
         stopOnRefusedToken: Bool = true,
-        tokenRetryCap: TimeInterval = 300
+        tokenRetryCap: TimeInterval = 300,
+        tokenExchange: CentrifugeTokenExchange? = nil
     ) {
         self.timeout = timeout
         self.headers = headers
@@ -118,6 +119,7 @@ public struct CentrifugeClientConfig {
         self.maxPendingRpc = maxPendingRpc
         self.stopOnRefusedToken = stopOnRefusedToken
         self.tokenRetryCap = tokenRetryCap
+        self.tokenExchange = tokenExchange
     }
 
     /// Timeout for server responses and for opening the connection (the WebSocket
@@ -221,6 +223,11 @@ public struct CentrifugeClientConfig {
     /// 10 to 20 seconds and doubles with each consecutive failure, up to this cap. Default 300.
     public var tokenRetryCap: TimeInterval
 
+    /// Obtains and renews the connection token from a refresh token the application stores, over the
+    /// connection itself. Exclusive with `tokenGetter`: `CentrifugeClient.create` throws for both. See
+    /// `CentrifugeTokenExchange`. Default nil.
+    public var tokenExchange: CentrifugeTokenExchange?
+
 }
 
 /// A typealias for a provider that returns a custom `URLSessionConfiguration`.
@@ -282,7 +289,9 @@ public class CentrifugeClient: @unchecked Sendable {
     internal let rpcTracker: RpcTracker = RpcTracker()
     // The explicit refresh calls and the marks of the timer refreshes (Refresh.swift).
     internal let refreshState: RefreshState = RefreshState()
-    
+    // The token exchange of the client, when one is configured (TokenExchangeRefusal.swift).
+    internal var tokenExchangeState: TokenExchangeState = TokenExchangeState()
+
     //MARK -
     fileprivate(set) var internalState: CentrifugeClientState = .disconnected
     fileprivate var request: URLRequest
@@ -290,7 +299,7 @@ public class CentrifugeClient: @unchecked Sendable {
     // attempt gets a new transport object; transportId identifies it, and callbacks of a
     // transport that is no longer current are ignored.
     fileprivate var conn: WebSocketInterface?
-    fileprivate var transportId: UInt64 = 0
+    internal var transportId: UInt64 = 0
     fileprivate var openTimeoutTask: DispatchWorkItem?
     fileprivate var client: String?
     internal var token: String?
@@ -310,7 +319,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var reconnectAttempts = 0
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
-    fileprivate var refreshRequired: Bool = false
+    internal var refreshRequired: Bool = false
     // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
     internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
@@ -731,6 +740,11 @@ internal extension CentrifugeClient {
     }
         
     func getConnectionToken(completion: @escaping (Result<String, Error>)->()) {
+        // With a token exchange the token is renewed over the connection (TokenExchangeFlow.swift).
+        if config.tokenExchange != nil {
+            renewTokenExchangeToken(completion: completion)
+            return
+        }
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
             let once = CallOnce()
@@ -862,6 +876,13 @@ fileprivate extension CentrifugeClient {
         // over, even though the client is connecting again.
         let attempt = self.transportId
 
+        if config.tokenExchange != nil {
+            // The token exchange connects first, without a token when none is kept (TokenExchangeFlow.swift).
+            beginTokenExchangeAttempt()
+            openTransport()
+            return
+        }
+
         if refreshRequired && config.tokenGetter == nil {
             // The token expired and there is no getter to get a new one.
             delegate?.onError(self, CentrifugeErrorEvent(error: CentrifugeError.configurationError(
@@ -986,6 +1007,10 @@ fileprivate extension CentrifugeClient {
     
     /// - Parameter token: the token the connect command carried.
     func handleConnectResult(res: Centrifugal_Centrifuge_Protocol_ConnectResult?, error: Error?, token: String?) {
+        // A token exchange may take an anonymous reply over; the connect resumes when its bootstrap completes.
+        if error == nil, let anonymous: Centrifugal_Centrifuge_Protocol_ConnectResult = res, tokenExchangeInterceptsConnect(anonymous) {
+            return
+        }
         if let err = error {
             defer {
                 self.delegate?.onError(
@@ -1071,7 +1096,7 @@ fileprivate extension CentrifugeClient {
             
             // Periodically refresh connection token.
             if result.expires {
-                self.startConnectionRefresh(after: Double(result.ttl))
+                self.startConnectionRefresh(after: self.connectionRenewalDelay(ttl: result.ttl))
             }
         }
     }
@@ -1363,7 +1388,7 @@ internal extension CentrifugeClient {
         let transportId = self.transportId
         let refreshTask = DispatchWorkItem { [weak self] in
             guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
-            guard strongSelf.config.tokenGetter != nil else { return }
+            guard strongSelf.config.tokenGetter != nil || strongSelf.config.tokenExchange != nil else { return }
             // Go through getConnectionToken rather than calling config.tokenGetter
             // directly: the app completes the getter on whatever thread it likes,
             // and everything below - failUnauthorized (which runs processDisconnect,
@@ -1441,6 +1466,7 @@ internal extension CentrifugeClient {
         // Close the transport before anything else, so that events emitted below
         // never see it, and frames it already read are not delivered.
         self.closeTransport()
+        self.tokenExchangeTransportLost(code: code, terminal: !reconnect)
 
         if reconnect {
             self.state = .connecting
@@ -1614,6 +1640,19 @@ internal extension CentrifugeClient {
                 completion(rep.refresh, nil)
             }
         })
+    }
+}
+
+
+// The token exchange flow (TokenExchangeFlow.swift) reaches the connect reply and the command writer through these two,
+// because the members they wrap are private to this file.
+internal extension CentrifugeClient {
+    func resumeConnect(_ result: Centrifugal_Centrifuge_Protocol_ConnectResult) {
+        self.handleConnectResult(res: result, error: nil, token: nil)
+    }
+
+    func sendPlainCommand(command: Centrifugal_Centrifuge_Protocol_Command, completion: @escaping (Centrifugal_Centrifuge_Protocol_Reply?, Error?)->()) {
+        self.sendCommand(command: command, completion: completion)
     }
 }
 
