@@ -627,7 +627,7 @@ final class RefreshTests: @unchecked Sendable {
         setup.client.rpc(method: "m", data: Data()) { (_: Result<CentrifugeRpcResult, Error>) -> Void in
         }
         await awaitSyncQueue(setup.client)
-        #expect(!server.received().contains(where: \.hasRpc), "the rpc waits for the refresh command")
+        #expect(server.received().filter(\.hasRpc).isEmpty, "the rpc waits for the refresh command")
 
         // The timer command ends by its timeout: the waiting rpc is written then.
         server.dropCommand = nil
