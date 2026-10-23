@@ -159,7 +159,7 @@ private final class RedirectStubProtocol: URLProtocol {
             return
         }
         guard let response: HTTPURLResponse = HTTPURLResponse(url: served, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers) else {
-            client?.urlProtocol(self, didFailWithError: URLError(.unknownError))
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -310,10 +310,12 @@ private func redirectOptions(
     fakeURL: String,
     maxRedirectsInflight: Int = 4,
     maxQueued: Int = 64,
+    additionalHeaders: [AnyHashable: Any]? = nil,
     redirect: ((CentrifugeReplyOutcome) -> CentrifugeRedirect?)?
 ) -> CentrifugeRpcPoolOptions {
     let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [RedirectStubProtocol.self]
+    configuration.httpAdditionalHeaders = additionalHeaders
     return CentrifugeRpcPoolOptions(
         endpoints: { (_: String) -> [String] in
             return [fakeURL]
@@ -454,6 +456,33 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
         #expect(fetched.first?.value(forHTTPHeaderField: "X-Chunk") == "1")
         #expect(fetched.first?.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(fetched.first?.value(forHTTPHeaderField: "Cookie") == nil)
+        withExtendedLifetime(pool) {}
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func redirectFetchIgnoresTheApplicationSessionHeaders() async throws {
+        fake.setAnswer(plainAnswer)
+        RedirectStubProtocol.book.setRule { (_: URLRequest) -> StubAnswer in
+            return .respond(status: 200, headers: [:], body: Data("bytes".utf8), url: nil)
+        }
+        let main: RedirectMainHarness = await connectedMain()
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(
+            main: main.client,
+            options: redirectOptions(
+                fakeURL: fake.server.url,
+                additionalHeaders: ["Authorization": "Bearer application-secret"],
+                redirect: redirectHook(to: "https://redirect.stub/secret")
+            )
+        )
+        let outcome: RedirectOutcome = RedirectOutcome("session headers")
+        startCall(pool, outcome)
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(outcome.data == Data("bytes".utf8))
+
+        let fetched: [URLRequest] = fetchesOf(RedirectStubProtocol.book.seen())
+        #expect(fetched.count == 1)
+        #expect(fetched.first?.value(forHTTPHeaderField: "Authorization") == nil)
         withExtendedLifetime(pool) {}
         withExtendedLifetime(main.delegate) {}
     }

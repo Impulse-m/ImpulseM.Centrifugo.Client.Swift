@@ -88,18 +88,27 @@ internal func urlWithoutFragment(_ url: URL) -> String {
 }
 
 
-/// The configuration of a pool's redirect session. With the application's session, its transport settings (proxy,
-/// TLS, timeouts) are kept. Cookies, stored credentials and the cache are never used. Without a session, an ephemeral
-/// configuration.
+/// The configuration of a pool's redirect session. It is a fresh ephemeral configuration: the application's session
+/// contributes only its transport settings (proxy, TLS, timeouts, URL protocol classes, waiting for connectivity).
+/// Its headers, cookies, stored credentials and cache are never copied, so an application header such as
+/// `Authorization` never reaches the host that a redirect names.
 internal func redirectSessionConfiguration(_ session: URLSession?) -> URLSessionConfiguration {
-    var configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
-    if let given: URLSession = session, let copy: URLSessionConfiguration = given.configuration.copy() as? URLSessionConfiguration {
-        configuration = copy
-    }
+    let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.urlCredentialStorage = nil
     configuration.urlCache = nil
+    guard let given: URLSession = session else {
+        return configuration
+    }
+    let source: URLSessionConfiguration = given.configuration
+    configuration.connectionProxyDictionary = source.connectionProxyDictionary
+    configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
+    configuration.tlsMaximumSupportedProtocolVersion = source.tlsMaximumSupportedProtocolVersion
+    configuration.timeoutIntervalForRequest = source.timeoutIntervalForRequest
+    configuration.timeoutIntervalForResource = source.timeoutIntervalForResource
+    configuration.protocolClasses = source.protocolClasses
+    configuration.waitsForConnectivity = source.waitsForConnectivity
     return configuration
 }
 

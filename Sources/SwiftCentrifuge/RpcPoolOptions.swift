@@ -78,7 +78,8 @@ public struct CentrifugeRpcPoolOptions {
     public var maxRedirectBytes: Int
 
     /// The session whose transport settings (proxy, TLS, timeouts) the redirect fetches keep. The pool uses its own
-    /// delegate, and never the cookies, stored credentials or cache of the session. Nil means an ephemeral session.
+    /// delegate, and never the headers, cookies, stored credentials or cache of the session. Nil means an ephemeral
+    /// session.
     public var urlSession: URLSession?
 
 
