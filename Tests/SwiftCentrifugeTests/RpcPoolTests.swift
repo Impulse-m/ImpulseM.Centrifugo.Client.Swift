@@ -548,9 +548,12 @@ final class RpcPoolTests: @unchecked Sendable {
         let random: ManualRandom = ManualRandom(draw: 1)
         let main: MainHarness = await connectedMain(random: random)
         let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(retries: 3))
+        let remainingRange: ClosedRange<UInt64> = 0 ... 200_000_000
         let armed: Expectation = Expectation("later resend armed at the deadline")
+        // The admission also arms a 0.2 s timer (the call's deadline, while its connection opens). The later resend's
+        // timer is the one armed after its draw, so the observer waits until the draw is on record.
         main.scheduler.observe { (call: ScheduledCall) -> Void in
-            if call.delay == 0.2 {
+            if call.delay == 0.2 && random.requestedRanges.contains(remainingRange) {
                 armed.fulfill()
             }
         }
@@ -564,9 +567,10 @@ final class RpcPoolTests: @unchecked Sendable {
             outcome.record(result)
         }
         await fulfillment(of: armed, within: 5)
-        let remainingRange: ClosedRange<UInt64> = 0 ... 200_000_000
         #expect(random.requestedRanges.last == remainingRange, "the later delay is drawn over the remaining 200 ms")
 
+        // The first send is on record at the server, so the count below is final: only the refused send.
+        await fake.awaitArrivals("first send refused", count: 1, isRpcCommand)
         // The resend is due at the deadline, so the call times out and nothing else is sent.
         await main.scheduler.advance(by: 0.2)
         await fulfillment(of: outcome.done, within: 5)
@@ -599,7 +603,7 @@ final class RpcPoolTests: @unchecked Sendable {
         }
         await fulfillment(of: outcome.done, within: 5)
         // The completion runs after the hook would have run, so the count is final here.
-        #expect(kindOf(outcome.error) == "replyError 1000")
+        #expect(kindOf(outcome.error) == "replyErrorDetails 1000")
         #expect(hookCalls.current == 0, "with retries 0 the reroute hook is not called")
         #expect(fake.allCommands().filter(isRpcCommand).count == 1)
         withExtendedLifetime(main.delegate) {}
