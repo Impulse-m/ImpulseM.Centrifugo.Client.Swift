@@ -326,12 +326,12 @@ public class CentrifugeClient: @unchecked Sendable {
     // The token source of the rpc pools that take their token from this client (RpcPoolTokenSource.swift). The first
     // such pool makes it. The connect, refresh and disconnect points below tell it of the client's events.
     internal var poolTokenSource: RpcPoolTokenSource? = nil
-    // The ping watchdog (the startWaitPing group below) reads and arms these three.
-    fileprivate var pingTimer: DispatchWorkItem?
+    // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
+    internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
     internal var sendPong: Bool = false
     // The ping watchdog: the clock time of the last decoded batch that carried a reply.
-    fileprivate var lastReplyNanos: UInt64 = 0
+    internal var lastReplyNanos: UInt64 = 0
     // The publish debounce windows of the subscriptions and their one timer (PublishDebounce.swift).
     internal var publishDebounce: PublishDebounceState = PublishDebounceState()
     fileprivate var reconnectTask: DispatchWorkItem?
@@ -1385,53 +1385,11 @@ fileprivate extension CentrifugeClient {
             self.log.error("error deserializeCommands: \(error)")
         }
     }
-    
-    // Arms the one watchdog timer of the connection. Replies do not re-arm it: handleData only
-    // records lastReplyNanos, and the timer re-arms itself when it fires.
-    private func startWaitPing() {
-        if self.pingInterval == 0 {
-            return
-        }
-        self.pingTimer?.cancel()
-        self.lastReplyNanos = self.clock.monotonicNanos()
-        self.armPingTimer(transportId: self.transportId, after: self.pingWindowSeconds())
-    }
-
-    private func stopWaitPing() {
-        self.pingTimer?.cancel()
-    }
-
-    // Arms the one watchdog timer of the connection to fire after `delay`.
-    private func armPingTimer(transportId: UInt64, after delay: TimeInterval) {
-        let pingTimer: DispatchWorkItem = DispatchWorkItem { [weak self] in
-            guard let strongSelf: CentrifugeClient = self else { return }
-            strongSelf.pingTimerFired(transportId: transportId)
-        }
-        self.pingTimer = pingTimer
-        self.scheduleTimeout(after: delay, pingTimer)
-    }
-
-    // Fires once per window at most. A reply since the timer was armed moves the check to one
-    // window after that reply; otherwise the connection has been silent for a whole window.
-    private func pingTimerFired(transportId: UInt64) {
-        guard self.isCurrentConnection(transportId) else { return }
-        let window: UInt64 = clientNanos(self.pingWindowSeconds())
-        let now: UInt64 = self.clock.monotonicNanos()
-        let silent: UInt64 = now > self.lastReplyNanos ? now - self.lastReplyNanos : 0
-        if silent < window {
-            self.armPingTimer(transportId: transportId, after: clientSeconds(nanos: window - silent))
-            return
-        }
-        self.processDisconnect(code: connectingCodeNoPing, reason: "no ping", reconnect: true)
-    }
-
-    private func pingWindowSeconds() -> TimeInterval {
-        return Double(self.pingInterval) + self.config.maxServerPingDelay
-    }
 }
 
 
-// The ping watchdog reaches processDisconnect from Client+PingWatchdog.swift, so this extension is internal.
+// Called from other files: processDisconnect and failUnauthorized (Refresh.swift, TokenExchangeFlow.swift and the ping
+// watchdog in Client+PingWatchdog.swift), so this extension is internal.
 internal extension CentrifugeClient {
     private func stopReconnect() {
         self.reconnectTask?.cancel()
