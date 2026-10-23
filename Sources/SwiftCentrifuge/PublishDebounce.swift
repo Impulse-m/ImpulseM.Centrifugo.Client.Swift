@@ -65,16 +65,16 @@ internal extension CentrifugeClient {
 
     /// Publishes for a subscription that has its window. The first publish of a window is sent at once and
     /// opens the window; a publish inside an open window replaces the pending value and completes at once.
-    /// A window whose end has passed but whose timer has not run yet ends first, so the publish is judged
-    /// against the window the timer would leave. A channel without a window is published as it is.
+    /// A window stays open until its timer runs, even when its deadline has passed, so a publish that arrives
+    /// before the timer is coalesced into the pending value (as the JS and Java SDKs do). A channel without a
+    /// window is published as it is.
     func publishThroughDebounce(channel: String, data: Data, completion: @escaping (Result<CentrifugePublishResult, Error>) -> ()) {
         let now: UInt64 = self.clock.monotonicNanos()
-        self.endPublishDebounceWindowIfDue(channel: channel, now: now)
         guard var window: PublishDebounceWindow = self.publishDebounce.windows[channel] else {
             self.publish(channel: channel, data: data, completion: completion)
             return
         }
-        if let deadline: UInt64 = window.deadline, deadline > now {
+        if window.deadline != nil {
             window.pending = data
             self.publishDebounce.windows[channel] = window
             self.rearmPublishDebounce()

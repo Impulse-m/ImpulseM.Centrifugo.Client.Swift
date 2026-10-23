@@ -216,7 +216,7 @@ final class PublishDebounceTests: @unchecked Sendable {
     }
 
 
-    @Test func publishAtTheWindowEndIsSentAtOnceBeforeTheTimerRuns() async throws {
+    @Test func publishAtTheWindowEndIsHeldUntilTheTimerRuns() async throws {
         let session: DebounceSession = try await connectAndSubscribe(windowMillis: debounceWindowMillis)
         let first: CompletionLog = CompletionLog()
         let second: CompletionLog = CompletionLog()
@@ -226,16 +226,20 @@ final class PublishDebounceTests: @unchecked Sendable {
             return isDebouncedPublish(command, "1")
         }
         await fulfillment(of: first.finished, within: 5)
-        // The clock reaches the window end without running the timer, so the window is still listed as open.
+        // The clock reaches the window end without running the timer, so the window is still open. The publish
+        // is coalesced into the pending value and completes at once, as in the JS and Java SDKs.
         session.scheduler.passTime(by: debounceWindowSeconds)
         publish(session, "2", second)
-        await fake.awaitArrivals("publish at the window end") { (command: RpcCommand) -> Bool in
+        await fulfillment(of: second.finished, within: 5)
+        #expect(second.successes == 1)
+        #expect(debouncedPayloads(fake) == ["1"], "a publish before the timer is held back")
+
+        // The timer runs at the window end and sends the pending value.
+        await session.scheduler.advance(by: debounceWindowSeconds)
+        await fake.awaitArrivals("pending value at the window end") { (command: RpcCommand) -> Bool in
             return isDebouncedPublish(command, "2")
         }
-        await fulfillment(of: second.finished, within: 5)
-
-        #expect(debouncedPayloads(fake) == ["1", "2"], "a publish at the window end is not held back")
-        #expect(second.successes == 1)
+        #expect(debouncedPayloads(fake) == ["1", "2"])
     }
 
 
