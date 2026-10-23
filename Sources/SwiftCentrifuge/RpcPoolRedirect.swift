@@ -351,11 +351,17 @@ internal final class RpcPoolFetches {
 
     private var session: URLSession? = nil
 
-    /// The fetches that hold a slot.
-    private var running: [RpcPoolFetch] = []
+    /// The fetches that hold a slot, by the call they serve. A call has at most one fetch.
+    private var running: [ObjectIdentifier: RpcPoolFetch] = [:]
 
-    /// The fetches that wait for a slot, in arrival order.
-    private var waiting: [RpcPoolFetch] = []
+    /// The fetches that wait for a slot, by the call they serve.
+    private var waiting: [ObjectIdentifier: RpcPoolFetch] = [:]
+
+    /// The waiting fetches in arrival order, from `waitingHead` on. A fetch that left the line stays here until the head
+    /// reaches it, or until the stale entries outnumber the live ones (compactWaitingIfNeeded); it is skipped then.
+    private var waitingOrder: [RpcPoolFetch] = []
+
+    private var waitingHead: Int = 0
 
 
     internal init(
@@ -394,7 +400,9 @@ internal final class RpcPoolFetches {
 
     /// Adds a fetch to the line, and starts the fetches that a free slot takes.
     internal func request(_ fetch: RpcPoolFetch) {
-        waiting.append(fetch)
+        let key: ObjectIdentifier = ObjectIdentifier(fetch.call)
+        waiting[key] = fetch
+        waitingOrder.append(fetch)
         startWaiting()
     }
 
@@ -412,11 +420,13 @@ internal final class RpcPoolFetches {
 
     /// Cancels every fetch and ends the session. The pool settles the calls.
     internal func close() {
-        for fetch: RpcPoolFetch in running {
+        for fetch: RpcPoolFetch in running.values {
             fetch.task?.cancel()
         }
-        running = []
-        waiting = []
+        running = [:]
+        waiting = [:]
+        waitingOrder = []
+        waitingHead = 0
         session?.invalidateAndCancel()
         session = nil
     }
@@ -424,15 +434,12 @@ internal final class RpcPoolFetches {
 
     /// Removes the fetch of a call from either line. Returns it, or nil when the call has no fetch.
     private func take(_ call: RpcPoolCall) -> RpcPoolFetch? {
-        if let index: Int = waiting.firstIndex(where: { (candidate: RpcPoolFetch) -> Bool in
-            return candidate.call === call
-        }) {
-            return waiting.remove(at: index)
+        let key: ObjectIdentifier = ObjectIdentifier(call)
+        if let fetch: RpcPoolFetch = waiting.removeValue(forKey: key) {
+            compactWaitingIfNeeded()
+            return fetch
         }
-        if let index: Int = running.firstIndex(where: { (candidate: RpcPoolFetch) -> Bool in
-            return candidate.call === call
-        }) {
-            let fetch: RpcPoolFetch = running.remove(at: index)
+        if let fetch: RpcPoolFetch = running.removeValue(forKey: key) {
             fetch.task?.cancel()
             return fetch
         }
@@ -440,10 +447,51 @@ internal final class RpcPoolFetches {
     }
 
 
+    /// Takes the first fetch of the arrival order that still waits, or nil when none does.
+    private func popWaiting() -> RpcPoolFetch? {
+        while waitingHead < waitingOrder.count {
+            let candidate: RpcPoolFetch = waitingOrder[waitingHead]
+            waitingHead += 1
+            let key: ObjectIdentifier = ObjectIdentifier(candidate.call)
+            if waiting[key] === candidate {
+                waiting[key] = nil
+                // The consumed prefix is dropped once it is half of the array, so the array stays amortised O(1) per fetch.
+                if waitingHead >= 64 && waitingHead * 2 >= waitingOrder.count {
+                    waitingOrder.removeFirst(waitingHead)
+                    waitingHead = 0
+                }
+                return candidate
+            }
+        }
+        waitingOrder = []
+        waitingHead = 0
+        return nil
+    }
+
+
+    /// Drops the stale entries of the arrival order once they outnumber the waiting fetches twofold. The cost is linear in
+    /// the entries, and it runs after at least as many cancels as entries it drops, so it is amortised O(1) per cancel.
+    private func compactWaitingIfNeeded() {
+        let stored: Int = waitingOrder.count - waitingHead
+        if stored <= 2 * waiting.count + 64 {
+            return
+        }
+        var live: [RpcPoolFetch] = []
+        live.reserveCapacity(waiting.count)
+        for index: Int in waitingHead ..< waitingOrder.count {
+            let candidate: RpcPoolFetch = waitingOrder[index]
+            if waiting[ObjectIdentifier(candidate.call)] === candidate {
+                live.append(candidate)
+            }
+        }
+        waitingOrder = live
+        waitingHead = 0
+    }
+
+
     /// Starts the waiting fetches, in arrival order, while a slot is free.
     private func startWaiting() {
-        while running.count < limit && !waiting.isEmpty {
-            let fetch: RpcPoolFetch = waiting.removeFirst()
+        while running.count < limit, let fetch: RpcPoolFetch = popWaiting() {
             start(fetch)
         }
     }
@@ -463,7 +511,7 @@ internal final class RpcPoolFetches {
         let target: URLSession = currentSession()
         let task: URLSessionDataTask = target.dataTask(with: fetch.makeRequest())
         fetch.task = task
-        running.append(fetch)
+        running[ObjectIdentifier(fetch.call)] = fetch
         delegate.register(task.taskIdentifier, body)
         task.resume()
     }
@@ -472,12 +520,11 @@ internal final class RpcPoolFetches {
     /// The session reported the end of a fetch. A fetch that was taken out already (cancelled, expired, closed) is
     /// ignored. The call settles with the bytes, or with `replyError(code: 18)`.
     private func completed(_ fetch: RpcPoolFetch, _ outcome: Result<Data, RpcPoolRedirectFailure>) {
-        guard let index: Int = running.firstIndex(where: { (candidate: RpcPoolFetch) -> Bool in
-            return candidate === fetch
-        }) else {
+        let key: ObjectIdentifier = ObjectIdentifier(fetch.call)
+        guard running[key] === fetch else {
             return
         }
-        running.remove(at: index)
+        running[key] = nil
         startWaiting()
         switch outcome {
         case .success(let data):
