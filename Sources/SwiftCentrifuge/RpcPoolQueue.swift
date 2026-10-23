@@ -23,6 +23,9 @@ internal final class RpcPoolCall {
     /// The connection that carries the call, once it is placed.
     internal var connection: RpcPoolConnection? = nil
 
+    /// The URL of the endpoint of the connection that carried the call last. A redirect checks its scheme against it.
+    internal var endpointURL: String = ""
+
     /// Whether the call still holds a slot of `connection`: set at placement, cleared when the connection answers.
     internal var holdsSlot: Bool = false
 

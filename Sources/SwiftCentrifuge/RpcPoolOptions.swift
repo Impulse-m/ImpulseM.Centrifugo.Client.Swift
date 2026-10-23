@@ -6,6 +6,9 @@ import Foundation
 /// The longest span a pool timer can run, in seconds: the largest millisecond count of a 32-bit timer.
 internal let maxPoolTimerSeconds: TimeInterval = 2147483.647
 
+/// The most redirect fetches a pool may run at once.
+internal let maxRedirectsInflightCeiling: Int = 16
+
 
 /// Options of an `CentrifugeRpcPool`. The connections of the pool are plain clients of the endpoint URLs,
 /// built with these connection settings. Calls are plain requests: no instance, no message id.
@@ -63,6 +66,21 @@ public struct CentrifugeRpcPoolOptions {
     /// still ahead). It never runs on a lost call or a timeout.
     public var reroute: ((CentrifugeReplyError) -> String?)?
 
+    /// Maps the outcome of a call that reached a connection to the bytes the pool fetches, or nil for no redirect. The
+    /// hook sees a reply, a server error and a connection loss. It does not see a timeout, a cancel or a close.
+    public var redirect: ((CentrifugeReplyOutcome) -> CentrifugeRedirect?)?
+
+    /// Redirect fetches in flight at most, over the pool, from 1 to 16. A fetch that finds no free slot waits for one in
+    /// arrival order, and counts in `queued`. Default 4.
+    public var maxRedirectsInflight: Int
+
+    /// Body bytes a redirect fetch accepts at most, unless its redirect gives its own. Default 16 MiB.
+    public var maxRedirectBytes: Int
+
+    /// The session whose transport settings (proxy, TLS, timeouts) the redirect fetches keep. The pool uses its own
+    /// delegate, and never the cookies, stored credentials or cache of the session. Nil means an ephemeral session.
+    public var urlSession: URLSession?
+
 
     public init(
         endpoints: @escaping (String) -> [String],
@@ -79,7 +97,11 @@ public struct CentrifugeRpcPoolOptions {
         maxQueued: Int = 64,
         idleTimeout: TimeInterval = 60.0,
         retries: Int = 3,
-        reroute: ((CentrifugeReplyError) -> String?)? = nil
+        reroute: ((CentrifugeReplyError) -> String?)? = nil,
+        redirect: ((CentrifugeReplyOutcome) -> CentrifugeRedirect?)? = nil,
+        maxRedirectsInflight: Int = 4,
+        maxRedirectBytes: Int = 16 * 1024 * 1024,
+        urlSession: URLSession? = nil
     ) {
         self.endpoints = endpoints
         self.headers = headers
@@ -96,6 +118,10 @@ public struct CentrifugeRpcPoolOptions {
         self.idleTimeout = idleTimeout
         self.retries = retries
         self.reroute = reroute
+        self.redirect = redirect
+        self.maxRedirectsInflight = maxRedirectsInflight
+        self.maxRedirectBytes = maxRedirectBytes
+        self.urlSession = urlSession
     }
 }
 
@@ -133,18 +159,23 @@ public struct CentrifugeRpcPoolStats: Equatable {
     /// Calls holding a slot of a connection.
     public let inflight: Int
 
-    /// Calls waiting for a connection.
+    /// Calls waiting for a connection, and redirect fetches waiting for a slot.
     public let queued: Int
+
+    /// Redirect fetches holding a slot.
+    public let redirects: Int
 
 
     public init(
         connections: Int,
         inflight: Int,
-        queued: Int
+        queued: Int,
+        redirects: Int = 0
     ) {
         self.connections = connections
         self.inflight = inflight
         self.queued = queued
+        self.redirects = redirects
     }
 }
 
@@ -174,6 +205,12 @@ internal func poolConfigurationError(_ options: CentrifugeRpcPoolOptions) -> Cen
     }
     if !isPoolTimerSpan(options.minReconnectDelay, allowZero: true) || !isPoolTimerSpan(options.maxReconnectDelay, allowZero: true) {
         return CentrifugeError.configurationError(message: "reconnect delays must be spans of at most 2147483.647 seconds")
+    }
+    if options.maxRedirectsInflight < 1 || options.maxRedirectsInflight > maxRedirectsInflightCeiling {
+        return CentrifugeError.configurationError(message: "maxRedirectsInflight must be from 1 to 16")
+    }
+    if options.maxRedirectBytes < 0 {
+        return CentrifugeError.configurationError(message: "maxRedirectBytes must be at least 0")
     }
     return nil
 }

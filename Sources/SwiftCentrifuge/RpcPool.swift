@@ -8,7 +8,8 @@ import Foundation
 // waiting calls. The deadline timer also wakes at the end of an endpoint's hold (after a connection ended for good)
 // and at the end of a later resend's delay. A call in flight carries its own deadline on its connection. A call
 // lost with its connection, refused with the later signal or moved by the reroute hook is resent while `retries`
-// and its deadline allow. The pool does not send tokens or redirect yet.
+// and its deadline allow. A call that the redirect hook moves to bytes at a URL is settled by a fetch of those bytes
+// (RpcPoolRedirect.swift). The pool does not send tokens yet.
 
 /// A pool of connections for plain rpc calls: several connections per endpoint, a window of calls on each, and a
 /// bounded wait queue. The calls are plain requests, so their methods must be safe to run more than once.
@@ -27,6 +28,9 @@ public final class CentrifugeRpcPool {
 
     /// The settings of each connection, from the pool's options.
     private let connectionConfig: CentrifugeClientConfig
+
+    /// The redirect fetches of the pool: their slots, their line and their session.
+    private let fetches: RpcPoolFetches
 
     /// Guards `statsSnapshot`, which the queue writes and any thread reads.
     private let statsLock: NSLock = NSLock()
@@ -60,6 +64,11 @@ public final class CentrifugeRpcPool {
         self.main = main
         self.queue = main.syncQueue
         self.options = options
+        self.fetches = RpcPoolFetches(
+            queue: main.syncQueue,
+            limit: options.maxRedirectsInflight,
+            configuration: redirectSessionConfiguration(options.urlSession)
+        )
         self.configError = poolConfigurationError(options)
         self.connectionConfig = CentrifugeClientConfig(
             timeout: options.timeout,
@@ -89,8 +98,8 @@ public final class CentrifugeRpcPool {
     ///
     /// Failures: `clientRejected(code: 4)` after `close`, `unauthorized` and `clientDisconnected` while the main client
     /// is ended or disconnected, `configurationError` for an option that cannot work, `replyError(code: 16)` when the
-    /// line is full, `timeout` at the deadline, `replyError(code: 17)` for a cancel, and `connectionClosed` for a call
-    /// in flight that the pool closes.
+    /// line is full, `timeout` at the deadline, `replyError(code: 17)` for a cancel, `replyError(code: 18)` for a
+    /// redirect that did not complete, and `connectionClosed` for a call in flight that the pool closes.
     @discardableResult
     public func rpc(
         endpointKey: String,
@@ -345,6 +354,7 @@ public final class CentrifugeRpcPool {
             headers[name] = affinity
         }
         call.connection = conn
+        call.endpointURL = conn.endpoint.url
         call.holdsSlot = true
         conn.inFlight += 1
         let queue: DispatchQueue = self.queue
@@ -367,7 +377,7 @@ public final class CentrifugeRpcPool {
         releaseSlot(call)
         switch result {
         case .success:
-            settle(call, result)
+            settleAnswered(call, result)
         case .failure(let error):
             answerFailed(call, error)
         }
@@ -390,7 +400,7 @@ public final class CentrifugeRpcPool {
             serverErrorAnswered(call, reply: reply, error: error)
             return
         }
-        settle(call, .failure(error))
+        settleAnswered(call, .failure(error))
     }
 
 
@@ -399,7 +409,7 @@ public final class CentrifugeRpcPool {
     private func serverErrorAnswered(_ call: RpcPoolCall, reply: CentrifugeReplyError, error: Error) {
         let now: UInt64 = main.clock.monotonicNanos()
         if call.resends >= options.retries || call.deadline <= now {
-            settle(call, .failure(error))
+            settleAnswered(call, .failure(error))
             return
         }
         if let key: String = options.reroute?(reply) {
@@ -410,7 +420,7 @@ public final class CentrifugeRpcPool {
             waitForLaterResend(call, now: now)
             return
         }
-        settle(call, .failure(error))
+        settleAnswered(call, .failure(error))
     }
 
 
@@ -476,7 +486,7 @@ public final class CentrifugeRpcPool {
         }
         let now: UInt64 = main.clock.monotonicNanos()
         if call.resends >= options.retries || call.deadline <= now {
-            settle(call, .failure(CentrifugeError.connectionClosed))
+            settleAnswered(call, .failure(CentrifugeError.connectionClosed))
             return
         }
         call.resends += 1
@@ -538,7 +548,9 @@ public final class CentrifugeRpcPool {
             settle(call, .failure(cancelledCallError()))
             drain(call.endpointKey)
         } else {
+            _ = fetches.cancel(call)
             settle(call, .failure(cancelledCallError()))
+            updateWaitTimer()
         }
         publishStats()
     }
@@ -623,7 +635,7 @@ public final class CentrifugeRpcPool {
         }
         for call: RpcPoolCall in lost {
             if repeatsLoss {
-                settle(call, .failure(CentrifugeError.connectionClosed))
+                settleAnswered(call, .failure(CentrifugeError.connectionClosed))
             } else {
                 resendLost(call)
             }
@@ -743,6 +755,88 @@ public final class CentrifugeRpcPool {
     }
 
 
+    // MARK: - Redirects
+
+    /// Settles a call that reached a connection, after the redirect hook has seen its outcome. A hook that returns a
+    /// redirect starts its fetch instead. A timeout and a cancel are the pool's own outcomes, so they settle at once.
+    private func settleAnswered(_ call: RpcPoolCall, _ result: Result<CentrifugeRpcResult, Error>) {
+        guard let hook: (CentrifugeReplyOutcome) -> CentrifugeRedirect? = options.redirect, !closed, !call.isSettled else {
+            settle(call, result)
+            return
+        }
+        let outcome: CentrifugeReplyOutcome
+        switch result {
+        case .success(let reply):
+            outcome = .reply(reply)
+        case .failure(let error):
+            if isPoolLocal(error) {
+                settle(call, result)
+                return
+            }
+            outcome = .error(error)
+        }
+        guard let redirect: CentrifugeRedirect = hook(outcome) else {
+            settle(call, result)
+            return
+        }
+        startFetch(call, redirect)
+    }
+
+
+    /// Whether an error is one the pool settles itself: a deadline or a cancel.
+    private func isPoolLocal(_ error: Error) -> Bool {
+        guard let known: CentrifugeError = error as? CentrifugeError else {
+            return false
+        }
+        switch known {
+        case .timeout:
+            return true
+        case .replyError(let code, _, _):
+            return code == rpcCodeCancelled
+        default:
+            return false
+        }
+    }
+
+
+    /// Starts the fetch of a redirect for a call. The URL is checked first, with no request for a refused one. A fetch
+    /// that finds no free slot waits for one in the line, which counts in `queued` under `maxQueued`.
+    private func startFetch(_ call: RpcPoolCall, _ redirect: CentrifugeRedirect) {
+        let maxBytes: Int = redirect.maxBytes ?? options.maxRedirectBytes
+        guard let url: URL = allowedRedirectURL(redirect.url, endpoint: call.endpointURL) else {
+            settle(call, .failure(CentrifugeError.replyError(code: rpcCodeRedirectFailed, message: "redirect URL is not allowed for the endpoint", temporary: false)))
+            return
+        }
+        if maxBytes < 0 {
+            settle(call, .failure(CentrifugeError.configurationError(message: "maxBytes must be an integer of at least 0")))
+            return
+        }
+        if fetches.isFull && queuedCount() >= options.maxQueued {
+            settle(call, .failure(CentrifugeError.replyError(code: rpcCodeLimitExceeded, message: "limit exceeded", temporary: false)))
+            return
+        }
+        let fetch: RpcPoolFetch = RpcPoolFetch(
+            call: call,
+            url: url,
+            headers: redirect.headers,
+            maxBytes: maxBytes
+        ) { [weak self] (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            self?.fetchSettled(call, result)
+        }
+        fetches.request(fetch)
+        publishStats()
+        updateWaitTimer()
+    }
+
+
+    /// A redirect fetch ended: the call settles with its bytes or with its failure.
+    private func fetchSettled(_ call: RpcPoolCall, _ result: Result<CentrifugeRpcResult, Error>) {
+        settle(call, result)
+        publishStats()
+        updateWaitTimer()
+    }
+
+
     // MARK: - Timers, stats and close
 
     /// Keeps the deadline timer at the earliest moment that wakes the pool: the deadline of a waiting call, the end of
@@ -765,6 +859,9 @@ public final class CentrifugeRpcPool {
         }
         for call: RpcPoolCall in resendWaits {
             earliest = earlierNanos(earliest, call.resendAt)
+        }
+        for call: RpcPoolCall in fetches.calls {
+            earliest = earlierNanos(earliest, call.deadline)
         }
         waitTimer.rearm(at: earliest, on: main, lateGrace: true) { [weak self] () -> Void in
             self?.waitTimerFired()
@@ -814,6 +911,7 @@ public final class CentrifugeRpcPool {
                 lines[call.endpointKey, default: []].append(call)
             }
         }
+        expired.append(contentsOf: fetches.expire(now: now))
         for call: RpcPoolCall in expired {
             settle(call, .failure(CentrifugeError.timeout))
         }
@@ -823,9 +921,10 @@ public final class CentrifugeRpcPool {
 
 
     /// The calls that wait for a slot: the lines, and the later resends that wait for their delay. Both count
-    /// toward `maxQueued`, so a parked resend takes the room of a waiting call.
+    /// toward `maxQueued`, so a parked resend takes the room of a waiting call. The redirect fetches that wait for a
+    /// slot count too.
     private func queuedCount() -> Int {
-        var total: Int = resendWaits.count
+        var total: Int = resendWaits.count + fetches.waitingCount
         for line: [RpcPoolCall] in lines.values {
             total += line.count
         }
@@ -846,7 +945,8 @@ public final class CentrifugeRpcPool {
         let snapshot: CentrifugeRpcPoolStats = CentrifugeRpcPoolStats(
             connections: connections,
             inflight: inflight,
-            queued: queuedCount()
+            queued: queuedCount(),
+            redirects: fetches.runningCount
         )
         self.statsLock.lock()
         self.statsSnapshot = snapshot
@@ -878,6 +978,7 @@ public final class CentrifugeRpcPool {
         endpointsByKey = [:]
         lines = [:]
         resendWaits = []
+        fetches.close()
         for call: RpcPoolCall in Array(unsettled.values) {
             if call.connection == nil {
                 settle(call, .failure(cancelledCallError()))
