@@ -766,6 +766,9 @@ final class RpcTrackerTests: @unchecked Sendable {
             }
             return self.successReply()
         }
+        // The connect handler arms the ping watchdog after it has called onConnected, so the test waits for
+        // that handler to finish before it observes: otherwise the 35 s watchdog arm could be recorded.
+        await drain(harness)
         // The observer is set before the call starts, so the arm of the call's deadline is seen too. The
         // resend is due at that same moment (its delay is capped at the deadline), so the one timer is
         // never re-armed for it: every arm of the call is at or before the deadline.
