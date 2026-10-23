@@ -4,6 +4,7 @@
 //
 //  Created by Tomasz Trela on 08/03/2018.
 //  Copyright © 2018 Vluxe. All rights reserved.
+//  Modified by ImpulseM; see THIRD_PARTY_NOTICES.md.
 //
 
 import Foundation

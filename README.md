@@ -209,7 +209,9 @@ To run a single suite use a filter, for example:
 
 SwiftCentrifuge is available under the MIT license. See [LICENSE](LICENSE) for details.
 
-Some files are derived from Starscream (Apache-2.0), the delta decoder is derived from the Fossil SCM delta code (BSD-2-Clause), and the protocol definitions are MIT-licensed by their authors. Their notices and license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Some files are derived from Starscream (Apache-2.0), the delta decoder is derived from the Fossil SCM delta code (BSD-2-Clause), and the protocol definitions are MIT-licensed by their authors. Their notices and license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the full texts are in the [licenses](licenses) folder.
+
+An app that distributes binaries built with SwiftCentrifuge must include the copyright notices and the license texts from the [licenses](licenses) folder, and the notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), in its documentation or its legal notices screen. The BSD-2-Clause and MIT licenses require this for binary redistribution, and the Apache-2.0 license requires the notices of the modified files to be kept.
 
 ## Release (for maintainers)
 
