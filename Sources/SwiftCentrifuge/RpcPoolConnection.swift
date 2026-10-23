@@ -33,6 +33,10 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     /// The idle timer of the connection, pending while one is armed. The pool arms at most one per connection.
     internal var idleItem: DispatchWorkItem? = nil
 
+    /// Calls that the connection lost before an answer. Their outcome waits for the connection's next event: that
+    /// event tells a loss that repeats (message size, unauthorized) from one that may be resent.
+    internal var lostCalls: [RpcPoolCall] = []
+
     /// Set when the pool closes the connection or drops it. Its client's later events are then ignored.
     internal var closed: Bool = false
 
@@ -71,10 +75,11 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     }
 
 
-    /// The client ended for good: the connection leaves its endpoint.
+    /// The client ended for good: the connection leaves its endpoint, with the code that ended it.
     internal func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {
+        let code: UInt32 = event.code
         self.forward { (owner: CentrifugeRpcPool, connection: RpcPoolConnection) -> Void in
-            owner.connectionDisconnected(connection)
+            owner.connectionDisconnected(connection, code: code)
         }
     }
 

@@ -59,9 +59,58 @@ private func kindOf(_ error: CentrifugeError?) -> String {
         return "configurationError"
     case .replyError(let code, _, _):
         return "replyError \(code)"
+    case .replyErrorDetails(let details):
+        return "replyErrorDetails \(details.code)"
     default:
         return "other"
     }
+}
+
+
+/// Whether a command is an rpc command.
+private func isRpcCommand(_ command: RpcCommand) -> Bool {
+    return command.hasRpc
+}
+
+
+/// A main client on the manual clock and scheduler, with the delegate it keeps weakly.
+private struct ManualMainHarness {
+    let setup: ManualClientSetup
+    let delegate: RecordingClientDelegate
+}
+
+
+/// The reply of a server refusal with the later retry signal, as the server sends it.
+private func laterRefusalReply() -> RpcReply {
+    var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
+    error.code = 111
+    error.message = "too many requests"
+    error.temporary = true
+    error.metadata = [rpcRetryMetadataKey: rpcRetryValueLater]
+    var reply: RpcReply = RpcReply()
+    reply.error = error
+    return reply
+}
+
+
+/// The reply of a server error that moves the call to the endpoint key "b".
+private func moveReply() -> RpcReply {
+    var error: Centrifugal_Centrifuge_Protocol_Error = Centrifugal_Centrifuge_Protocol_Error()
+    error.code = 1000
+    error.message = "moved"
+    error.metadata = ["x-example-relocate": "b"]
+    var reply: RpcReply = RpcReply()
+    reply.error = error
+    return reply
+}
+
+
+/// The reply of a raw connect command: a connect result with no ping and no pong.
+private func connectReply(_ id: UInt32) -> RpcReply {
+    var reply: RpcReply = RpcReply()
+    reply.id = id
+    reply.connect = Centrifugal_Centrifuge_Protocol_ConnectResult()
+    return reply
 }
 
 
@@ -86,7 +135,8 @@ final class RpcPoolTests: @unchecked Sendable {
         maxConnectionsPerEndpoint: Int = 2,
         maxQueued: Int = 64,
         idleTimeout: TimeInterval = 60,
-        affinityHeader: String? = nil
+        affinityHeader: String? = nil,
+        retries: Int = 3
     ) -> CentrifugeRpcPoolOptions {
         let url: String = fake.server.url
         return CentrifugeRpcPoolOptions(
@@ -96,8 +146,24 @@ final class RpcPoolTests: @unchecked Sendable {
             affinityHeader: affinityHeader,
             maxConnectionsPerEndpoint: maxConnectionsPerEndpoint,
             maxQueued: maxQueued,
-            idleTimeout: idleTimeout
+            idleTimeout: idleTimeout,
+            retries: retries
         )
+    }
+
+
+    /// A main client on the manual clock, connected to the fake server, with the given random source.
+    private func connectedManual(random: ClientRandom) async -> ManualMainHarness {
+        let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
+        let setup: ManualClientSetup = makeManualClient(
+            endpoint: fake.server.url,
+            config: CentrifugeClientConfig(),
+            delegate: delegate,
+            random: random
+        )
+        setup.client.connect()
+        await delegate.awaitConnected(times: 1)
+        return ManualMainHarness(setup: setup, delegate: delegate)
     }
 
 
@@ -322,5 +388,176 @@ final class RpcPoolTests: @unchecked Sendable {
             answered.fulfill()
         }
         await fulfillment(of: [answered, closed], within: 5)
+    }
+
+
+    // MARK: resends
+
+    @Test func poolLostCallOnMessageSizeCloseIsNotResent() async throws {
+        let raw: RawWebSocketServer = RawWebSocketServer()
+        let arrivals: ArrivalLog<RpcCommand> = ArrivalLog()
+        raw.onCommand = { (command: RpcCommand) -> Void in
+            if command.hasConnect {
+                raw.write(RawWebSocketServer.frame(RawWebSocketServer.payload([connectReply(command.id)])))
+            }
+            arrivals.record(command)
+        }
+        try raw.start()
+        defer {
+            raw.stop()
+        }
+
+        let main: MainHarness = await connectedMain()
+        let options: CentrifugeRpcPoolOptions = CentrifugeRpcPoolOptions(
+            endpoints: { (_: String) -> [String] in
+                return [raw.url]
+            },
+            maxConnectionsPerEndpoint: 1
+        )
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: options)
+        let outcome: PoolOutcome = PoolOutcome("call lost to the size close")
+        pool.rpc(endpointKey: "", method: "m", data: Data("A".utf8), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await arrivals.awaitArrivals("rpc sent", count: 1, isRpcCommand)
+
+        // Close code 1009 (message too big): the client ends for good with the size code, and the call is not sent again.
+        raw.write(Data([0x88, 0x02, 0x03, 0xF1]))
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "connectionClosed")
+        #expect(arrivals.all.filter(isRpcCommand).count == 1)
+        #expect(pool.stats() == CentrifugeRpcPoolStats(connections: 0, inflight: 0, queued: 0))
+    }
+
+
+    @Test func poolLostCallIsResentAfterTheConnectionReconnects() async throws {
+        let aData: Data = Data("A".utf8)
+        let dropped: LockedBox<Bool> = LockedBox(false)
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            guard command.hasRpc && command.rpc.data == aData else {
+                return false
+            }
+            if dropped.current {
+                return false
+            }
+            dropped.set(true)
+            return true
+        }
+        let main: MainHarness = await connectedMain()
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: poolOptions(maxConnectionsPerEndpoint: 1))
+        let outcome: PoolOutcome = PoolOutcome("call lost with its connection")
+        pool.rpc(endpointKey: "", method: "m", data: aData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fake.awaitArrivals("A sent", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+
+        // The transport drops with the call in flight: the pool resends it once the connection is back.
+        fake.server.closeConnection()
+        await fake.awaitArrivals("A resent", count: 2) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "none")
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func laterRefusalIsResentAtTheCeilingOfItsDelayAndStopsAtRetries() async throws {
+        fake.setAnswer { (command: RpcCommand) -> RpcReply? in
+            if command.hasRpc {
+                return laterRefusalReply()
+            }
+            return nil
+        }
+        // Draw 1 gives the ceiling of the delay: 250 ms for the first resend, as `min(250 ms * 2^0, remaining)`.
+        let main: ManualMainHarness = await connectedManual(random: ManualRandom(draw: 1))
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.setup.client, options: poolOptions(retries: 1))
+        let armed: Expectation = Expectation("later resend armed")
+        main.setup.scheduler.observe { (call: ScheduledCall) -> Void in
+            if call.delay == 0.25 {
+                armed.fulfill()
+            }
+        }
+        let outcome: PoolOutcome = PoolOutcome("refused call")
+        pool.rpc(endpointKey: "", method: "m", data: Data(), options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            outcome.record(result)
+        }
+        await fulfillment(of: armed, within: 5)
+
+        // The resend waits on the manual clock: nothing is sent before the clock moves past the delay.
+        #expect(fake.allCommands().filter(isRpcCommand).count == 1)
+        await main.setup.scheduler.advance(by: 0.25)
+        await fake.awaitArrivals("resend after its delay", count: 2, isRpcCommand)
+
+        // The one resend is spent, so the second refusal reaches the call unchanged.
+        await fulfillment(of: outcome.done, within: 5)
+        #expect(kindOf(outcome.error) == "replyErrorDetails 111")
+        #expect(fake.allCommands().filter(isRpcCommand).count == 2)
+        withExtendedLifetime(main.delegate) {}
+    }
+
+
+    @Test func poolRoutesMoveBeforeLater() async throws {
+        let aData: Data = Data("A".utf8)
+        let wData: Data = Data("W".utf8)
+        let dropped: LockedBox<Bool> = LockedBox(false)
+        // The first send of A gets no answer; the test sends the move itself, once W waits in its line.
+        fake.setDrop { (command: RpcCommand) -> Bool in
+            guard command.hasRpc && command.rpc.data == aData else {
+                return false
+            }
+            if dropped.current {
+                return false
+            }
+            dropped.set(true)
+            return true
+        }
+        let main: MainHarness = await connectedMain()
+        var options: CentrifugeRpcPoolOptions = poolOptions(maxConnectionsPerEndpoint: 1)
+        options.reroute = { (reply: CentrifugeReplyError) -> String? in
+            return reply.metadata["x-example-relocate"]
+        }
+        let pool: CentrifugeRpcPool = CentrifugeRpcPool(main: main.client, options: options)
+
+        let first: PoolOutcome = PoolOutcome("call A")
+        pool.rpc(endpointKey: "a", method: "m", data: aData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            first.record(result)
+        }
+        await fake.awaitArrivals("A sent", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+
+        // W waits in the line of key "b": the one connection is full with A.
+        let second: PoolOutcome = PoolOutcome("call W")
+        pool.rpc(endpointKey: "b", method: "m", data: wData, options: CentrifugeRpcPoolCallOptions()) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
+            second.record(result)
+        }
+        await awaitSyncQueue(main.client)
+        #expect(pool.stats() == CentrifugeRpcPoolStats(connections: 1, inflight: 1, queued: 1))
+
+        // The move of A joins the front of key "b", so the slot that frees takes A before W.
+        let aCommand: RpcCommand? = fake.allCommands().first(where: { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        })
+        let sent: RpcCommand = try #require(aCommand)
+        var refusal: RpcReply = moveReply()
+        refusal.id = sent.id
+        fake.server.sendReply(refusal)
+
+        await fake.awaitArrivals("A moved and resent", count: 2) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == aData
+        }
+        await fake.awaitArrivals("W sent", count: 1) { (command: RpcCommand) -> Bool in
+            return command.hasRpc && command.rpc.data == wData
+        }
+        await fulfillment(of: [first.done, second.done], within: 5)
+        #expect(kindOf(first.error) == "none")
+        #expect(kindOf(second.error) == "none")
+        let order: [String] = fake.allCommands().filter(isRpcCommand).map { (command: RpcCommand) -> String in
+            return String(decoding: command.rpc.data, as: UTF8.self)
+        }
+        #expect(order == ["A", "A", "W"])
     }
 }

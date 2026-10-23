@@ -6,8 +6,8 @@ import Foundation
 
 /// One pool call. Its completion runs once, on the pool's queue.
 internal final class RpcPoolCall {
-    /// The endpoint key the call was made with.
-    internal let endpointKey: String
+    /// The endpoint key the call waits under. A call that the reroute hook moves takes the new key.
+    internal var endpointKey: String
 
     internal let method: String
 
@@ -26,8 +26,17 @@ internal final class RpcPoolCall {
     /// Whether the call still holds a slot of `connection`: set at placement, cleared when the connection answers.
     internal var holdsSlot: Bool = false
 
-    /// Claims the completion: the first settlement runs it, and a later one does nothing. A settled call may still
-    /// hold its slot until its connection answers.
+    /// The resends the call has made, of any cause (a loss, a later refusal, a move). `retries` bounds it, and the
+    /// delay of a later resend grows with it.
+    internal var resends: Int = 0
+
+    /// The monotonic moment a later resend of the call is due. Set while the call waits in the resend wait list.
+    internal var resendAt: UInt64 = 0
+
+    /// Set when the completion has run. A settled call may still hold its slot until its connection answers.
+    internal var isSettled: Bool = false
+
+    /// Claims the completion: the first settlement runs it, and a later one does nothing.
     internal let settleOnce: CallOnce = CallOnce()
 
 

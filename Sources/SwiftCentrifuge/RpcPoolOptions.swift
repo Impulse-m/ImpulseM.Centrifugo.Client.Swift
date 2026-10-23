@@ -53,6 +53,15 @@ public struct CentrifugeRpcPoolOptions {
     /// Seconds a connection without calls stays open. 0 keeps it open until `close`. Default 60.
     public var idleTimeout: TimeInterval
 
+    /// Resends of one call at most, counted over all causes together: a call lost with its connection, a server
+    /// refusal with the later signal, and a move by `reroute`. Default 3; 0 is valid and sends no resend.
+    public var retries: Int
+
+    /// Maps a server error reply to an endpoint key. A reply that maps to a key moves the call to that key, at the
+    /// front of its line, while `retries` and the call's deadline allow. Nil, or a nil result, means no move. The
+    /// hook runs on server error replies only, never on a lost call or a timeout.
+    public var reroute: ((CentrifugeReplyError) -> String?)?
+
 
     public init(
         endpoints: @escaping (String) -> [String],
@@ -67,7 +76,9 @@ public struct CentrifugeRpcPoolOptions {
         maxConnectionsPerEndpoint: Int = 2,
         maxInflightPerConnection: Int = 1,
         maxQueued: Int = 64,
-        idleTimeout: TimeInterval = 60.0
+        idleTimeout: TimeInterval = 60.0,
+        retries: Int = 3,
+        reroute: ((CentrifugeReplyError) -> String?)? = nil
     ) {
         self.endpoints = endpoints
         self.headers = headers
@@ -82,6 +93,8 @@ public struct CentrifugeRpcPoolOptions {
         self.maxInflightPerConnection = maxInflightPerConnection
         self.maxQueued = maxQueued
         self.idleTimeout = idleTimeout
+        self.retries = retries
+        self.reroute = reroute
     }
 }
 
@@ -148,6 +161,9 @@ internal func poolConfigurationError(_ options: CentrifugeRpcPoolOptions) -> Cen
     }
     if options.maxQueued < 0 {
         return CentrifugeError.configurationError(message: "maxQueued must be at least 0")
+    }
+    if options.retries < 0 {
+        return CentrifugeError.configurationError(message: "retries must be at least 0")
     }
     if !isPoolTimerSpan(options.idleTimeout, allowZero: true) {
         return CentrifugeError.configurationError(message: "idleTimeout must be 0 or a span of at most 2147483.647 seconds")
