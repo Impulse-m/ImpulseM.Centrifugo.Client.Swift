@@ -105,6 +105,11 @@ Codes 15 to 17 are client-local errors of the fork SDKs; a server never sends th
 - With `CentrifugeClientConfig.stopOnRefusedToken` (default true), a retry that would send again the token the server refused as expired (109) is not sent. The connection is left to expire, and the next connect asks the token getter for a token. Set it to false to resend the same token.
 - A subscription token refresh follows the same rules, with its own failure count and its own retry delay: a failed refresh is reported through `onError` as `subscriptionRefreshError`. Code 103 keeps the subscription and is not retried, and any other error that is not retried unsubscribes with that code. This differs from earlier versions, which unsubscribed on code 109 and on any non-temporary error.
 
+## Ping watchdog
+
+- The connection closes with code 2 (`no ping`) and reconnects when the server has been silent for one window: the server's ping interval plus `CentrifugeClientConfig.maxServerPingDelay`. Any reply counts as activity: a command reply, a push or a server ping. The detection is one window after the last reply.
+- A server ping still gets its pong when the server asks for one.
+
 ## Usage in background
 
 When a mobile application goes to the background there are OS-specific limitations for established persistent connections - which can be silently closed shortly. Thus in most cases you need to disconnect from a server when app moves to the background and connect again when app goes to the foreground.

@@ -94,3 +94,11 @@ final class FakeRpcServer: @unchecked Sendable {
         return dropped
     }
 }
+
+
+/// Suspends until the client has handled the test's `count`-th push, which the delegate counts in
+/// onMessage. That callback runs after the push's frame was decoded, so it is the sync point before a
+/// test moves the clock past the push (the timers of the client see the push first).
+func awaitPushArrival(_ arrivals: EventCounter, count: Int) async {
+    await arrivals.awaitCount(times: count)
+}

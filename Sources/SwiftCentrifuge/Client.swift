@@ -314,6 +314,8 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var pingTimer: DispatchWorkItem?
     fileprivate var pingInterval: UInt32 = 0
     fileprivate var sendPong: Bool = false
+    // The ping watchdog (F11): the clock time of the last decoded batch that carried a reply.
+    fileprivate var lastReplyNanos: UInt64 = 0
     fileprivate var reconnectTask: DispatchWorkItem?
     fileprivate var log: CentrifugeLogger
 
@@ -1258,8 +1260,6 @@ fileprivate extension CentrifugeClient {
     
     private func handlePing() {
         guard self.state == .connected else { return }
-        self.stopWaitPing()
-        self.startWaitPing()
         if self.sendPong {
             try? self.sendCommandAsync(command: Centrifugal_Centrifuge_Protocol_Command())
         }
@@ -1303,6 +1303,9 @@ fileprivate extension CentrifugeClient {
     private func handleData(data: Data) {
         do {
             let replies = try CentrifugeSerializer.deserializeCommands(data: data)
+            if !replies.isEmpty {
+                self.lastReplyNanos = self.clock.monotonicNanos()
+            }
             let transportId = self.transportId
             for reply in replies {
                 // A message earlier in this frame ended the connection (a disconnect
@@ -1329,18 +1332,42 @@ fileprivate extension CentrifugeClient {
         }
     }
     
+    // Arms the one watchdog timer of the connection. Replies do not re-arm it: handleData only
+    // records lastReplyNanos, and the timer re-arms itself when it fires.
     private func startWaitPing() {
         if self.pingInterval == 0 {
             return
         }
         self.pingTimer?.cancel()
+        self.lastReplyNanos = self.clock.monotonicNanos()
+        self.armPingTimer(transportId: self.transportId, after: self.pingWindowSeconds())
+    }
+
+    private func armPingTimer(transportId: UInt64, after delay: TimeInterval) {
         let pingTimer = DispatchWorkItem { [weak self] in
             guard let strongSelf = self else { return }
-            guard strongSelf.state == .connected else { return }
-            strongSelf.processDisconnect(code: connectingCodeNoPing, reason: "no ping", reconnect: true)
+            strongSelf.pingTimerFired(transportId: transportId)
         }
         self.pingTimer = pingTimer
-        self.scheduleTimeout(after: Double(self.pingInterval) + self.config.maxServerPingDelay, pingTimer)
+        self.scheduleTimeout(after: delay, pingTimer)
+    }
+
+    // Fires once per window at most. A reply since the timer was armed moves the check to one
+    // window after that reply; otherwise the connection has been silent for a whole window.
+    private func pingTimerFired(transportId: UInt64) {
+        guard self.isCurrentConnection(transportId) else { return }
+        let window: UInt64 = clientNanos(self.pingWindowSeconds())
+        let now: UInt64 = self.clock.monotonicNanos()
+        let silent: UInt64 = now > self.lastReplyNanos ? now - self.lastReplyNanos : 0
+        if silent < window {
+            self.armPingTimer(transportId: transportId, after: Double(window - silent) / 1e9)
+            return
+        }
+        self.processDisconnect(code: connectingCodeNoPing, reason: "no ping", reconnect: true)
+    }
+
+    private func pingWindowSeconds() -> TimeInterval {
+        return Double(self.pingInterval) + self.config.maxServerPingDelay
     }
     
     private func stopWaitPing() {
