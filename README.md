@@ -1,29 +1,35 @@
 # SwiftCentrifuge
 
-## About this fork
-
-This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained alongside the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) of the same organization. The upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well. Version 2.0.0 adds the client features of the sibling SDKs and has a few breaking changes: see [MIGRATION.md](MIGRATION.md).
-
-Sibling SDKs from the same organization:
-
-- JavaScript: [JS client repository](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS)
-- Android (Java): [Java client repository](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java)
-
 Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) server and [Centrifuge](https://github.com/centrifugal/centrifuge) library.
 
-There is no v1 release of this library yet – API still evolves. At the moment patch version updates only contain backwards compatible changes, minor version updates can have backwards incompatible API changes.
+## About this fork
+
+This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), the upstream Swift client SDK. The fork is built for the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) and is released from its own repository. The upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
+
+- **Current version:** 2.0.0. Install it with Swift Package Manager from `https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git` (see [Installation](#installation)). The breaking changes of 2.0.0 are listed in [MIGRATION.md](MIGRATION.md).
+- **What the fork adds:**
+  - [Instance, server time and identity](#instance-server-time-and-identity)
+  - [Tracked rpc calls](#tracked-rpc-calls) and their [client error codes](#client-error-codes)
+  - [RPC pool](#rpc-pool)
+  - [Connection token refresh](#connection-token-refresh), including the token exchange
+  - [Ping watchdog](#ping-watchdog)
+  - [Publish debounce](#publish-debounce)
+- **Sibling repositories:**
+  - Server: [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo)
+  - Core (Go library used by the server): [ImpulseM.Centrifugo.Core](https://github.com/Impulse-m/ImpulseM.Centrifugo.Core)
+  - Protocol (source of `client.proto`): [ImpulseM.Centrifugo.Protocol](https://github.com/Impulse-m/ImpulseM.Centrifugo.Protocol)
+  - JavaScript SDK: [ImpulseM.Centrifugo.Client.JS](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS)
+  - Java SDK: [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java)
+
+> This SDK is built for the Centrifugo server fork. The one test suite that needs a real server, `GetStateTests`, runs against Centrifugo v6 from [docker-compose.yml](docker-compose.yml).
 
 Check out [client SDK API specification](https://centrifugal.dev/docs/transports/client_api) to learn how this SDK behaves. It's recommended to read that before starting to work with this SDK as the spec covers common SDK behavior - describes client and subscription state transitions, main options and methods. Also check out examples folder.
 
 The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
-> **This SDK is compatible with [the Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) and upstream [Centrifugo](https://github.com/centrifugal/centrifugo) v6.**
-
 ## Installation
 
-This library is distributed through Swift Package Manager only. CocoaPods and Carthage are not supported.
-
-`SwiftCentrifuge.podspec` is kept from upstream only so the upstream file history stays mergeable. It is not used for any distribution, and its `version` follows upstream's numbering (0.11.0), not this fork's release line (1.x).
+This library is distributed through Swift Package Manager. The repository keeps `SwiftCentrifuge.podspec` from upstream so the file history stays mergeable. It is not published, and its `version` follows upstream's numbering (0.11.0), not this fork's release line.
 
 ### Swift Package Manager
 
@@ -36,7 +42,7 @@ https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git
 Or add it to your `Package.swift` dependencies:
 
 ```swift
-.package(url: "https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git", from: "1.0.0")
+.package(url: "https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git", from: "2.0.0")
 ```
 
 The module and product name is `SwiftCentrifuge`, so import it as:
@@ -51,7 +57,7 @@ If you get a warning complaining about missing pc file, you may need to install 
 
 ## Dependencies
 
-This library depends on [SwiftProtobuf](https://github.com/apple/swift-protobuf)
+This library depends on [SwiftProtobuf](https://github.com/apple/swift-protobuf).
 
 ## Requirements
 
@@ -60,7 +66,7 @@ This library depends on [SwiftProtobuf](https://github.com/apple/swift-protobuf)
 
 ## Getting Started
 
-An [example app](Example) is included demonstrating basic client functionality.
+An [example app](Example) is included demonstrating basic client functionality. The [console example](Examples/ConsoleExample) runs against a local Centrifugo: `make run-console-example`.
 
 ## Instance, server time and identity
 
@@ -102,10 +108,36 @@ Codes 15 to 18 are client-local errors of the fork SDKs; a server never sends th
 
 `CentrifugeRpcPool(main:options:)` (or `CentrifugeRpcPool.create`, which throws for options that cannot work) runs plain calls for large payloads on several connections per endpoint URL. `endpoints` maps an endpoint key to URLs; each connection carries up to `maxInflightPerConnection` calls (default 1), and at most `maxConnectionsPerEndpoint` connections open per URL (default 2). A call that finds no free slot waits in the line of its key, up to `maxQueued` (default 64); a call beyond that fails with `replyError(code: 16)` unless it can open a connection. A connection without calls for `idleTimeout` (default 60 seconds) closes. `close(completion:)` closes every connection: waiting calls fail with `replyError(code: 17)`, calls in flight with `connectionClosed`, and later calls with `clientRejected(code: 4)`. The pool's calls use the main client's queue and clock, so a delegate callback may call `stats()` and `close(completion:)`.
 
-A call made while the main client is disconnected fails with `clientDisconnected`, or with `unauthorized` when the session ended. A call whose options cannot work (for example an `affinity` without `affinityHeader`, or a `timeout` above the pool's) fails with `configurationError`. A call lost with its connection is sent again on a connection of its key, at the back of the line. A call that the server refuses with `x-centrifugo-retry: later` is sent again after a random delay of up to 250 ms, doubled for each later resend of that call, and never longer than the time left before its deadline. The `reroute` option maps a server error reply to an endpoint key, and the call then moves to the front of that key's line. `retries` (default 3) bounds all resends of one call together, and no resend goes past the call's deadline. A connection that the server closes for message size (close code 1009) or that ends as unauthorized settles its calls in flight with `connectionClosed`, and none of them is sent again; the pool reports no error event for these closes. A server error reply to a pool call that carries an application code, type or metadata arrives as `replyErrorDetails`. The `redirect` option moves the bytes of a call to a URL. It receives the outcome of each call that reached a connection (a reply, a server error, or a connection that lost the call), and returns a `CentrifugeRedirect` (`url`, `headers`, and an optional `maxBytes`), or nil for no redirect. A timeout, a cancel and a close never reach it. The pool then fetches that URL with a GET that carries only the redirect's headers: no cookies and no credentials. The fetch follows no redirect, so a 3xx answer fails it, and so does a response whose URL differs from the requested one. The URL must be `https:`; `http:` is allowed only from an endpoint that is not secure, since `wss:` and `https:` endpoints are secure. A URL of another scheme fails the call before any request. A body over `maxBytes` (default `maxRedirectBytes`, 16 MiB) is refused before it is read in full, and a non-2xx status or a failed fetch fails the call; all of these settle the call with `replyError(code: 18)`. At most `maxRedirectsInflight` fetches run at once (default 4, from 1 to 16). A fetch that waits for a slot counts in `queued`, under `maxQueued`, and `close` settles it with `connectionClosed`. The deadline of the call covers the fetch. The fetch uses the transport settings of `urlSession` when one is given (proxy, TLS, timeouts, URL protocol classes), and none of its headers, cookies, credentials or cache. A runtime that follows a redirect anyway and reports no response URL cannot be detected by the pool, so it is outside this check; an application that needs a strict check on such a runtime uses its own session.
-The pool has two resend patterns for a server error, and both use the same budget of `retries`. `reroute` moves the call to another endpoint key, at the front of its line. `redirect` does not resend the call at all: it fetches the bytes at a URL and settles the call with them. A call that the server refuses with `later` takes the delayed resend, not the move, unless `reroute` maps the error first.
+### Failures and resends
 
-Tokens and identity. With `tokenFrom: true` the pool takes its token from its main client, the one way to share the client's token and session. Each connection is lent the main client's confirmed token: the token the server accepted at the client's last connect or accepted refresh, never one the application set and the client has not confirmed. A connection waits for the client while the client connects. A connection refused its token asks the client again, and the client renews its token once for each refused token; a renewal in progress is shared. When that renewal gives back the refused token, or the client has no `tokenGetter` and no `tokenExchange` to renew with, the token is spent: the calls that no connection can take fail with `clientRejected(code: 3, message: "token refused")` until the client's next confirmation. A call is bound to the identity generation of the client when it is made. When the identity changes, a call still waiting fails with `clientRejected(code: 3, message: "identity changed")`; when the session ends, it fails with `unauthorized`. A call is never written under another identity. Calls in flight complete on their connection. A connection of an identity the client has left retires at its next event: its next connect, a waiting call of its endpoint that finds it idle, or its idle timeout. The pool does not walk its connections when the identity changes, so after an account switch call `close(completion:)` on the pool to close them at once, and build a new pool. An application that logs a user out must do the same: the connections keep their identity until the main client confirms another one, and a plain `disconnect()` of the main client does not end it. A connection that the server confirms with another identity than its generation's is retired, and its token is spent. `closeEndedSession` (default true) closes the idle connections of a session the main client ended, as the client ends it, rather than at the idle timeout. Set it to `false` to keep them until their idle timeout or their next call. Without `tokenFrom`, `token` gives every connection the same token and `tokenGetter` asks for one per connection. `tokenFrom` is exclusive with both, and `CentrifugeRpcPool.create` throws `configurationError` for the combination.
+- A call made while the main client is disconnected fails with `clientDisconnected`, or with `unauthorized` when the session ended. A call whose options cannot work (for example an `affinity` without `affinityHeader`, or a `timeout` above the pool's) fails with `configurationError`.
+- A call lost with its connection is sent again on a connection of its key, at the back of the line.
+- A call that the server refuses with `x-centrifugo-retry: later` is sent again after a random delay of up to 250 ms, doubled for each later resend of that call, and never longer than the time left before its deadline.
+- The `reroute` option maps a server error reply to an endpoint key, and the call then moves to the front of that key's line.
+- `retries` (default 3) bounds all resends of one call together, and no resend goes past the call's deadline.
+- A connection that the server closes for message size (close code 1009) or that ends as unauthorized settles its calls in flight with `connectionClosed`, and none of them is sent again. The pool reports no error event for these closes.
+- A server error reply to a pool call that carries an application code, type or metadata arrives as `replyErrorDetails`.
+- The pool has two resend patterns for a server error, and both use the same budget of `retries`. `reroute` moves the call to another endpoint key, at the front of its line. `redirect` does not resend the call at all: it fetches the bytes at a URL and settles the call with them. A call that the server refuses with `later` takes the delayed resend, not the move, unless `reroute` maps the error first.
+
+### Redirect
+
+The `redirect` option moves the bytes of a call to a URL. It receives the outcome of each call that reached a connection (a reply, a server error, or a connection that lost the call), and returns a `CentrifugeRedirect` (`url`, `headers`, and an optional `maxBytes`), or nil for no redirect. A timeout, a cancel and a close never reach it.
+
+- The pool then fetches that URL with a GET that carries only the redirect's headers: no cookies and no credentials. The fetch follows no redirect, so a 3xx answer fails it, and so does a response whose URL differs from the requested one.
+- The URL must be `https:`; `http:` is allowed only from an endpoint that is not secure, since `wss:` and `https:` endpoints are secure. A URL of another scheme fails the call before any request.
+- A body over `maxBytes` (default `maxRedirectBytes`, 16 MiB) is refused before it is read in full, and a non-2xx status or a failed fetch fails the call. All of these settle the call with `replyError(code: 18)`.
+- At most `maxRedirectsInflight` fetches run at once (default 4, from 1 to 16). A fetch that waits for a slot counts in `queued`, under `maxQueued`, and `close` settles it with `connectionClosed`. The deadline of the call covers the fetch.
+- The fetch uses the transport settings of `urlSession` when one is given (proxy, TLS, timeouts, URL protocol classes), and none of its headers, cookies, credentials or cache. A runtime that follows a redirect anyway and reports no response URL cannot be detected by the pool, so it is outside this check; an application that needs a strict check on such a runtime uses its own session.
+
+### Tokens and identity
+
+- With `tokenFrom: true` the pool takes its token from its main client, the one way to share the client's token and session. Each connection is lent the main client's confirmed token: the token the server accepted at the client's last connect or accepted refresh, never one the application set and the client has not confirmed. A connection waits for the client while the client connects.
+- A connection refused its token asks the client again, and the client renews its token once for each refused token; a renewal in progress is shared. When that renewal gives back the refused token, or the client has no `tokenGetter` and no `tokenExchange` to renew with, the token is spent: the calls that no connection can take fail with `clientRejected(code: 3, message: "token refused")` until the client's next confirmation.
+- A call is bound to the identity generation of the client when it is made. When the identity changes, a call still waiting fails with `clientRejected(code: 3, message: "identity changed")`; when the session ends, it fails with `unauthorized`. A call is never written under another identity. Calls in flight complete on their connection.
+- A connection of an identity the client has left retires at its next event: its next connect, a waiting call of its endpoint that finds it idle, or its idle timeout. A connection that the server confirms with another identity than its generation's is retired, and its token is spent.
+- The pool does not walk its connections when the identity changes, so after an account switch call `close(completion:)` on the pool to close them at once, and build a new pool. An application that logs a user out must do the same: the connections keep their identity until the main client confirms another one, and a plain `disconnect()` of the main client does not end it.
+- `closeEndedSession` (default true) closes the idle connections of a session the main client ended, as the client ends it, rather than at the idle timeout. Set it to `false` to keep them until their idle timeout or their next call.
+- Without `tokenFrom`, `token` gives every connection the same token and `tokenGetter` asks for one per connection. `tokenFrom` is exclusive with both, and `CentrifugeRpcPool.create` throws `configurationError` for the combination.
 
 ## Connection token refresh
 
@@ -114,7 +146,11 @@ Tokens and identity. With `tokenFrom: true` the pool takes its token from its ma
 - A timer refresh refused with code 103 keeps the connection and its identity, and is not retried. Any other server error ends the connection with that code, without a reconnect.
 - With `CentrifugeClientConfig.stopOnRefusedToken` (default true), a retry that would send again the token the server refused as expired (109) is not sent. The connection is left to expire, and the next connect asks the token getter for a token. Set it to false to resend the same token.
 - A subscription token refresh follows the same rules, with its own failure count and its own retry delay: a failed refresh is reported through `onError` as `subscriptionRefreshError`. Code 103 keeps the subscription and is not retried, and any other error that is not retried unsubscribes with that code. This differs from earlier versions, which unsubscribed on code 109 and on any non-temporary error.
-- The token exchange (`CentrifugeClientConfig.tokenExchange`, a `CentrifugeTokenExchange`) gets the connection token from a refresh token the application stores, instead of from `tokenGetter`; the two are exclusive, and `CentrifugeClient.create` throws `configurationError` for both. The application implements `load` (the stored refresh token, or nil), `store` (a rotated refresh token) and `exchange`, which calls the server over the connection with `event.rpc`. An anonymous connect is completed by the exchange over the same connection, and the timer refresh renews the access token in the window of 0.7 to 0.9 of its ttl (0.6 to 0.9 with `earlyRenewal`). A refused refresh token (an `unauthorized` from `exchange`, or an rpc error whose `appType` is in `refusalTypes`) is presented again once, inside the `grace` (default 30 seconds, at most 300); a second refusal of the same token ends the session with code 1. Failed exchanges are retried with backoff, starting at 5 seconds.
+- The token exchange (`CentrifugeClientConfig.tokenExchange`, a `CentrifugeTokenExchange`) gets the connection token from a refresh token the application stores, instead of from `tokenGetter`; the two are exclusive, and `CentrifugeClient.create` throws `configurationError` for both.
+  - The application implements `load` (the stored refresh token, or nil), `store` (a rotated refresh token) and `exchange`, which calls the server over the connection with `event.rpc`.
+  - An anonymous connect is completed by the exchange over the same connection, and the timer refresh renews the access token in the window of 0.7 to 0.9 of its ttl (0.6 to 0.9 with `earlyRenewal`).
+  - A refused refresh token (an `unauthorized` from `exchange`, or an rpc error whose `appType` is in `refusalTypes`) is presented again once, inside the `grace` (default 30 seconds, at most 300); a second refusal of the same token ends the session with code 1.
+  - Failed exchanges are retried with backoff, starting at 5 seconds.
 
 ## Ping watchdog
 
@@ -171,7 +207,9 @@ To run a single suite use a filter, for example:
 
 ## License
 
-SwiftCentrifuge is available under the MIT license. See LICENSE for details.
+SwiftCentrifuge is available under the MIT license. See [LICENSE](LICENSE) for details.
+
+Some files are derived from Starscream (Apache-2.0), and the protocol definitions are MIT-licensed by their authors. Their notices and license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Release (for maintainers)
 
