@@ -361,9 +361,9 @@ internal extension CentrifugeClient {
                 // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
                 guard strongSelf.isCurrentConnection(transportId), !strongSelf.timerFetchIsSuperseded(generation) else { return }
                 // A refresh() call or a refresh command in flight goes first (refreshBusy): this fetch is not sent, and
-                // the chain tries again after the retry delay, so it does not end.
+                // the chain tries again after the retry delay, so it does not end. The deferral is not a failed refresh.
                 if strongSelf.refreshBusy {
-                    strongSelf.scheduleTimerRefreshRetry()
+                    strongSelf.deferTimerRefresh()
                     return
                 }
                 switch result {
@@ -417,6 +417,14 @@ internal extension CentrifugeClient {
     func scheduleTimerRefreshRetry() {
         let delay: TimeInterval = refreshRetryDelay(step: refreshState.failures, tokenRetryCap: config.tokenRetryCap, random: random)
         refreshState.failures += 1
+        startConnectionRefresh(after: delay)
+    }
+
+
+    /// Arms the timer refresh again after the delay of the current failure count, without counting a failure. A timer
+    /// fetch that a refresh in flight defers did not fail, so the next retry keeps its step.
+    func deferTimerRefresh() {
+        let delay: TimeInterval = refreshRetryDelay(step: refreshState.failures, tokenRetryCap: config.tokenRetryCap, random: random)
         startConnectionRefresh(after: delay)
     }
 

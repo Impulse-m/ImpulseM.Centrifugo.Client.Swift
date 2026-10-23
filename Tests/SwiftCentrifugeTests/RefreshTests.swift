@@ -701,4 +701,119 @@ final class RefreshTests: @unchecked Sendable {
         await fulfillment(of: [reconnected, refetchedOnConnect], within: 5)
         withExtendedLifetime(delegate) {}
     }
+
+
+    /// T4: a timer fetch that completes while an explicit call's command is in flight writes no refresh command. The
+    /// server has received only the explicit command, and it gets no second one before it answers.
+    @Test func timerFetchCompletingDuringAnExplicitCallWritesNoSecondCommand() async {
+        let completions: LockedBox<[(Result<String, Error>) -> Void]> = LockedBox([])
+        let fetches: EventCounter = EventCounter()
+        let getter: CentrifugeConnectionTokenGetter = { (_: CentrifugeConnectionTokenEvent, completion: @escaping (Result<String, Error>) -> Void) in
+            completions.update { (values: inout [(Result<String, Error>) -> Void]) in
+                values.append(completion)
+            }
+            fetches.record()
+        }
+        let explicitArrived: Expectation = Expectation("explicit refresh arrived")
+        let heldCommand: LockedBox<Centrifugal_Centrifuge_Protocol_Command?> = LockedBox(nil)
+        server.dropCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Bool in
+            // The explicit command is held: the test answers it after the timer fetch has completed.
+            guard command.hasRefresh, command.refresh.token == "E1" else {
+                return false
+            }
+            heldCommand.set(command)
+            explicitArrived.fulfill()
+            return true
+        }
+        var config: CentrifugeClientConfig = tokenConfig(getter)
+        config.timeout = 60
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: 10)
+
+        let explicitDone: Expectation = Expectation("explicit refresh refused")
+        setup.client.refresh(token: "E1") { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .failure = result {
+                explicitDone.fulfill()
+            }
+        }
+        await fulfillment(of: [explicitArrived], within: 5)
+        // The timer fires while the explicit command is in flight. The call was admitted before the fetch started, so
+        // the fetch is not superseded: it completes into the in-flight call.
+        await setup.scheduler.advance(by: 10)
+        await fetches.awaitCount(times: 1)
+        let timerFetch: (Result<String, Error>) -> Void = completions.current[0]
+        timerFetch(.success("T1"))
+        await awaitSyncQueue(setup.client)
+        #expect(refreshTokens() == ["E1"], "the timer fetch writes no second refresh command before the explicit reply")
+
+        // The server refuses the explicit call: it fails, and the timer fetch wrote nothing.
+        if let command: Centrifugal_Centrifuge_Protocol_Command = heldCommand.current {
+            server.sendReply(errorReply(to: command, code: 103, temporary: false))
+        }
+        await fulfillment(of: [explicitDone], within: 5)
+        #expect(refreshTokens() == ["E1"])
+        withExtendedLifetime(delegate) {}
+    }
+
+
+    /// T5: a timer fetch deferred by an explicit call in flight is not a failed refresh. The next failed fetch arms the
+    /// retry of the first step again, not the step after it.
+    @Test func timerFetchDeferredByAnExplicitCallKeepsTheNextRetryStep() async {
+        let completions: LockedBox<[(Result<String, Error>) -> Void]> = LockedBox([])
+        let fetches: EventCounter = EventCounter()
+        let getter: CentrifugeConnectionTokenGetter = { (_: CentrifugeConnectionTokenEvent, completion: @escaping (Result<String, Error>) -> Void) in
+            completions.update { (values: inout [(Result<String, Error>) -> Void]) in
+                values.append(completion)
+            }
+            fetches.record()
+        }
+        let explicitArrived: Expectation = Expectation("explicit refresh arrived")
+        let heldCommand: LockedBox<Centrifugal_Centrifuge_Protocol_Command?> = LockedBox(nil)
+        server.dropCommand = { (command: Centrifugal_Centrifuge_Protocol_Command) -> Bool in
+            // The explicit command is held: the test answers it after the timer fetch has completed.
+            guard command.hasRefresh, command.refresh.token == "E1" else {
+                return false
+            }
+            heldCommand.set(command)
+            explicitArrived.fulfill()
+            return true
+        }
+        var config: CentrifugeClientConfig = tokenConfig(getter)
+        config.timeout = 60
+        let delegate: ClosureClientDelegate = ClosureClientDelegate()
+        // Draw 1 takes the top of every range: the first retry is 20 s, the second 30 s.
+        let setup: ManualClientSetup = await startClient(config, delegate: delegate, ttl: 10, draw: 1)
+
+        let explicitDone: Expectation = Expectation("explicit refresh refused")
+        setup.client.refresh(token: "E1") { (result: Result<CentrifugeRefreshResult, Error>) in
+            if case .failure = result {
+                explicitDone.fulfill()
+            }
+        }
+        await fulfillment(of: [explicitArrived], within: 5)
+        await setup.scheduler.advance(by: 10)
+        await fetches.awaitCount(times: 1)
+        let timerFetch: (Result<String, Error>) -> Void = completions.current[0]
+        timerFetch(.success("T1"))
+        await awaitSyncQueue(setup.client)
+        // The deferral re-arms the timer after the first retry delay, and counts no failure.
+        #expect(lastNonLateTimerDelay(setup.scheduler) == 20)
+
+        // The server refuses the explicit call. The deferred timer is still armed, and the connection keeps its token.
+        if let command: Centrifugal_Centrifuge_Protocol_Command = heldCommand.current {
+            server.sendReply(errorReply(to: command, code: 103, temporary: false))
+        }
+        await fulfillment(of: [explicitDone], within: 5)
+
+        // The deferred timer fires at 30 s and fetches again; this fetch fails, so the retry is armed at the first step.
+        await setup.scheduler.advance(by: 20)
+        await fetches.awaitCount(times: 2)
+        let failedFetch: (Result<String, Error>) -> Void = completions.current[1]
+        failedFetch(.failure(FetchFailure()))
+        await awaitSyncQueue(setup.client)
+        // Had the deferral counted as a failure, the step after it would give 30 s here.
+        #expect(lastNonLateTimerDelay(setup.scheduler) == 20)
+        #expect(refreshTokens() == ["E1"])
+        withExtendedLifetime(delegate) {}
+    }
 }
