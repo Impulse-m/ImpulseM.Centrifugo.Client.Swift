@@ -82,6 +82,21 @@ public struct CentrifugeRpcPoolOptions {
     /// session.
     public var urlSession: URLSession?
 
+    /// Whether the connections take their token from the main client: the client's confirmed token is lent to each
+    /// connection, and a connection refused its token asks the client to renew it once. Exclusive with `token` and
+    /// `tokenGetter`. Default false.
+    public var tokenFrom: Bool
+
+    /// The token of each connection, for a pool without `tokenFrom`. Empty means no token. Exclusive with `tokenFrom`.
+    public var token: String
+
+    /// The token getter of each connection, for a pool without `tokenFrom`. Exclusive with `tokenFrom`.
+    public var tokenGetter: CentrifugeConnectionTokenGetter?
+
+    /// With `tokenFrom`, closes the idle connections of a session the main client ended, as the client ends it, instead of
+    /// at the idle timeout. Default true.
+    public var closeEndedSession: Bool
+
 
     public init(
         endpoints: @escaping (String) -> [String],
@@ -102,7 +117,11 @@ public struct CentrifugeRpcPoolOptions {
         redirect: ((CentrifugeReplyOutcome) -> CentrifugeRedirect?)? = nil,
         maxRedirectsInflight: Int = 4,
         maxRedirectBytes: Int = 16 * 1024 * 1024,
-        urlSession: URLSession? = nil
+        urlSession: URLSession? = nil,
+        tokenFrom: Bool = false,
+        token: String = "",
+        tokenGetter: CentrifugeConnectionTokenGetter? = nil,
+        closeEndedSession: Bool = true
     ) {
         self.endpoints = endpoints
         self.headers = headers
@@ -123,6 +142,10 @@ public struct CentrifugeRpcPoolOptions {
         self.maxRedirectsInflight = maxRedirectsInflight
         self.maxRedirectBytes = maxRedirectBytes
         self.urlSession = urlSession
+        self.tokenFrom = tokenFrom
+        self.token = token
+        self.tokenGetter = tokenGetter
+        self.closeEndedSession = closeEndedSession
     }
 }
 
@@ -212,6 +235,9 @@ internal func poolConfigurationError(_ options: CentrifugeRpcPoolOptions) -> Cen
     }
     if options.maxRedirectBytes < 0 {
         return CentrifugeError.configurationError(message: "maxRedirectBytes must be at least 0")
+    }
+    if options.tokenFrom && (!options.token.isEmpty || options.tokenGetter != nil) {
+        return CentrifugeError.configurationError(message: "tokenFrom is exclusive with token and tokenGetter")
     }
     return nil
 }

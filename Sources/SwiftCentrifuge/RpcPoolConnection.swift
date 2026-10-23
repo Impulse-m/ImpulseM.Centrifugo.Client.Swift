@@ -40,20 +40,41 @@ internal final class RpcPoolConnection: CentrifugeClientDelegate {
     /// Set when the pool closes the connection or drops it. Its client's later events are then ignored.
     internal var closed: Bool = false
 
-
     internal var isConnected: Bool {
         return self.linkState == .connected
     }
+
+
+    /// The identity generation of the connection's token. Zero without a token source.
+    internal var generation: UInt64 {
+        guard let box: RpcPoolConnectionToken = self.tokenBox else {
+            return 0
+        }
+        return box.generation
+    }
+
+
+    /// The token state of the connection, with a pool that takes its token from the main client (nil otherwise).
+    private let tokenBox: RpcPoolConnectionToken?
 
 
     internal init(
         endpoint: RpcPoolEndpoint,
         config: CentrifugeClientConfig,
         pool: CentrifugeRpcPool,
-        now: UInt64
+        now: UInt64,
+        tokenSource: RpcPoolTokenSource?
     ) {
+        var settings: CentrifugeClientConfig = config
+        var box: RpcPoolConnectionToken? = nil
+        if let source: RpcPoolTokenSource = tokenSource {
+            let made: RpcPoolConnectionToken = RpcPoolConnectionToken(source: source)
+            settings.tokenGetter = made.getter()
+            box = made
+        }
         self.endpoint = endpoint
-        self.client = CentrifugeClient(endpoint: endpoint.url, config: config)
+        self.tokenBox = box
+        self.client = CentrifugeClient(endpoint: endpoint.url, config: settings)
         self.pool = pool
         self.lastUse = now
         self.client.delegate = self

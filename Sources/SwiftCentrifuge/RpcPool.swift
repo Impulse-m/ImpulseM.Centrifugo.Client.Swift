@@ -13,7 +13,7 @@ import Foundation
 
 /// A pool of connections for plain rpc calls: several connections per endpoint, a window of calls on each, and a
 /// bounded wait queue. The calls are plain requests, so their methods must be safe to run more than once.
-public final class CentrifugeRpcPool {
+public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// The queue of the pool: the main client's. Its state is touched on it only, and it runs the completions.
     internal let queue: DispatchQueue
 
@@ -31,6 +31,9 @@ public final class CentrifugeRpcPool {
 
     /// The redirect fetches of the pool: their slots, their line and their session.
     private let fetches: RpcPoolFetches
+
+    /// The token source of the main client, with a pool that takes its token from it (`tokenFrom`). Nil otherwise.
+    private let tokenSource: RpcPoolTokenSource?
 
     /// Guards `statsSnapshot`, which the queue writes and any thread reads.
     private let statsLock: NSLock = NSLock()
@@ -70,7 +73,7 @@ public final class CentrifugeRpcPool {
             configuration: redirectSessionConfiguration(options.urlSession)
         )
         self.configError = poolConfigurationError(options)
-        self.connectionConfig = CentrifugeClientConfig(
+        var settings: CentrifugeClientConfig = CentrifugeClientConfig(
             timeout: options.timeout,
             headers: options.headers,
             minReconnectDelay: options.minReconnectDelay,
@@ -79,6 +82,15 @@ public final class CentrifugeRpcPool {
             name: options.name,
             version: options.version
         )
+        settings.token = options.token
+        settings.tokenGetter = options.tokenGetter
+        self.connectionConfig = settings
+        if options.tokenFrom {
+            self.tokenSource = RpcPoolTokenSource.forClient(main)
+        } else {
+            self.tokenSource = nil
+        }
+        self.tokenSource?.addListener(self)
     }
 
 
@@ -180,6 +192,15 @@ public final class CentrifugeRpcPool {
             settle(call, .failure(CentrifugeError.configurationError(message: "the endpoint key has no endpoint")))
             return
         }
+        if let source: RpcPoolTokenSource = tokenSource {
+            // The call is bound to the identity generation of the main client now, and refused when no connection can
+            // take it while the client's token is spent.
+            call.generation = source.generation
+            if source.isSpent && liveConnection(endpoints) == nil {
+                settle(call, .failure(CentrifugeError.clientRejected(code: 3, message: "token refused")))
+                return
+            }
+        }
         let timeout: TimeInterval = call.options.timeout ?? options.timeout
         call.deadline = main.clock.monotonicNanos() + clientNanos(timeout)
         unsettled[ObjectIdentifier(call)] = call
@@ -232,9 +253,10 @@ public final class CentrifugeRpcPool {
     /// The live connection with a free slot and the fewest calls, over the endpoints in order. Nil when there is none.
     private func liveConnection(_ endpoints: [RpcPoolEndpoint]) -> RpcPoolConnection? {
         var best: RpcPoolConnection? = nil
+        let current: UInt64 = currentGeneration()
         for endpoint: RpcPoolEndpoint in endpoints {
             for conn: RpcPoolConnection in endpoint.connections {
-                if !conn.isConnected || conn.inFlight >= options.maxInflightPerConnection {
+                if !conn.isConnected || conn.inFlight >= options.maxInflightPerConnection || conn.generation != current {
                     continue
                 }
                 guard let current: RpcPoolConnection = best else {
@@ -280,11 +302,17 @@ public final class CentrifugeRpcPool {
             return
         }
         let endpoints: [RpcPoolEndpoint] = endpointsByKey[key] ?? []
+        retireStaleIdle(endpoints)
         while let head: RpcPoolCall = lines[key]?.first {
             let now: UInt64 = main.clock.monotonicNanos()
             if head.deadline <= now {
                 removeHead(key)
                 settle(head, .failure(CentrifugeError.timeout))
+                continue
+            }
+            if let failure: CentrifugeError = waitingFailure(head, endpoints) {
+                removeHead(key)
+                settle(head, .failure(failure))
                 continue
             }
             guard let conn: RpcPoolConnection = liveConnection(endpoints) else {
@@ -300,6 +328,86 @@ public final class CentrifugeRpcPool {
             lines[key] = nil
         }
         updateWaitTimer()
+    }
+
+
+    /// The error a waiting call fails with at once, or nil while it may wait. Only a pool with `tokenFrom` has one: the
+    /// main client's end or disconnect, a call bound to an identity the client has left, and a spent token that no
+    /// connection of the identity can take.
+    private func waitingFailure(_ call: RpcPoolCall, _ endpoints: [RpcPoolEndpoint]) -> CentrifugeError? {
+        guard let source: RpcPoolTokenSource = tokenSource else {
+            return nil
+        }
+        if main.state == .disconnected {
+            if main.sessionEnded {
+                return CentrifugeError.unauthorized
+            }
+            return CentrifugeError.clientDisconnected
+        }
+        if call.generation != source.generation {
+            return CentrifugeError.clientRejected(code: 3, message: "identity changed")
+        }
+        if source.isSpent && liveConnection(endpoints) == nil {
+            return CentrifugeError.clientRejected(code: 3, message: "token refused")
+        }
+        return nil
+    }
+
+
+    /// The identity generation of the token source, or zero for a pool without `tokenFrom`.
+    private func currentGeneration() -> UInt64 {
+        guard let source: RpcPoolTokenSource = tokenSource else {
+            return 0
+        }
+        return source.generation
+    }
+
+
+    /// Closes the idle connections of the endpoints that carry an older identity generation. They retire at this event
+    /// only, when a call of their endpoint waits: the pool does not walk its connections for it.
+    private func retireStaleIdle(_ endpoints: [RpcPoolEndpoint]) {
+        let current: UInt64 = currentGeneration()
+        for endpoint: RpcPoolEndpoint in endpoints {
+            for conn: RpcPoolConnection in Array(endpoint.connections) {
+                if conn.inFlight == 0 && conn.lostCalls.isEmpty && conn.generation != current {
+                    closeConnection(conn)
+                }
+            }
+        }
+    }
+
+
+    /// Whether the idle connections close as their session ends: a pool with `tokenFrom`, the option set, and a main client
+    /// whose session the server ended.
+    private func endedSessionClosesIdle() -> Bool {
+        return tokenSource != nil && options.closeEndedSession && main.sessionEnded && main.state == .disconnected
+    }
+
+
+    /// Closes the idle connections of an ended session now (`closeEndedSession`).
+    private func closeEndedIdle() {
+        if !endedSessionClosesIdle() {
+            return
+        }
+        for endpoint: RpcPoolEndpoint in Array(endpointsByURL.values) {
+            for conn: RpcPoolConnection in Array(endpoint.connections) {
+                if conn.inFlight == 0 && conn.lostCalls.isEmpty {
+                    closeConnection(conn)
+                }
+            }
+        }
+    }
+
+
+    /// The main client changed state or identity, or ended its session: the idle connections of an ended session close,
+    /// and the waiting calls are placed or failed. Called on the queue by the token source.
+    internal func onMainEvent() {
+        if closed {
+            return
+        }
+        closeEndedIdle()
+        drainAll()
+        publishStats()
     }
 
 
@@ -524,7 +632,11 @@ public final class CentrifugeRpcPool {
         conn.inFlight -= 1
         conn.lastUse = main.clock.monotonicNanos()
         if conn.inFlight == 0 {
-            armIdle(conn)
+            if endedSessionClosesIdle() && conn.lostCalls.isEmpty {
+                closeConnection(conn)
+            } else {
+                armIdle(conn)
+            }
         }
     }
 
@@ -574,7 +686,8 @@ public final class CentrifugeRpcPool {
             endpoint: endpoint,
             config: connectionConfig,
             pool: self,
-            now: main.clock.monotonicNanos()
+            now: main.clock.monotonicNanos(),
+            tokenSource: tokenSource
         )
         endpoint.holdUntil = nil
         endpoint.connections.append(conn)
@@ -587,6 +700,13 @@ public final class CentrifugeRpcPool {
     /// The connection of an endpoint confirmed its connect: it takes calls now.
     internal func connectionConnected(_ conn: RpcPoolConnection) {
         if closed || conn.closed {
+            return
+        }
+        if conn.generation != currentGeneration() {
+            // The identity moved on while it connected: the connection retires at this event (R5.2).
+            closeConnection(conn)
+            drainAll()
+            publishStats()
             return
         }
         conn.linkState = .connected

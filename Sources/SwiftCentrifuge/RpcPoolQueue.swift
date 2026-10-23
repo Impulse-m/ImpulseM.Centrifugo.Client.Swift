@@ -39,6 +39,10 @@ internal final class RpcPoolCall {
     /// The monotonic moment a later resend of the call is due. Set while the call waits in the resend wait list.
     internal var resendAt: UInt64 = 0
 
+    /// The identity generation the call is bound to at admission. A pool with `tokenFrom` fails a waiting call whose
+    /// generation the main client has left (identity changed). Zero for a pool without `tokenFrom`.
+    internal var generation: UInt64 = 0
+
     /// Set when the completion has run. A settled call may still hold its slot until its connection answers.
     internal var isSettled: Bool = false
 

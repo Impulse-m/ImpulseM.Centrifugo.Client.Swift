@@ -281,6 +281,7 @@ internal extension CentrifugeClient {
         } else {
             stopConnectionRefresh()
         }
+        poolTokenSource?.refreshAccepted()
     }
 
 

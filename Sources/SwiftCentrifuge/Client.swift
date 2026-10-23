@@ -323,6 +323,9 @@ public class CentrifugeClient: @unchecked Sendable {
     // Set by every disconnect: true when it is the unauthorized one, which ends the session. The rpc pool
     // reads it while the client is disconnected (RpcPool.swift).
     internal var sessionEnded: Bool = false
+    // The token source of the rpc pools that take their token from this client (RpcPoolTokenSource.swift). The first
+    // such pool makes it. The connect, refresh and disconnect points below tell it of the client's events.
+    internal var poolTokenSource: RpcPoolTokenSource? = nil
     // The ping watchdog (Client+PingWatchdog.swift) reads and arms these three.
     internal var pingTimer: DispatchWorkItem?
     internal var pingInterval: UInt32 = 0
@@ -1097,6 +1100,7 @@ fileprivate extension CentrifugeClient {
             self.identity.applyConnect(user: result.user, authClass: result.authClass)
             self.delegate?.onConnected(self, CentrifugeConnectedEvent(client: result.client, data: result.data))
             self.delegate?.onAuth(self, CentrifugeAuthEvent(user: self.identity.user, authClass: self.identity.authClass))
+            self.poolTokenSource?.connectConfirmed()
             for cb in self.connectCallbacks.values {
                 cb(nil)
             }
@@ -1532,6 +1536,7 @@ internal extension CentrifugeClient {
             }
         }
 
+        self.poolTokenSource?.mainStateChanged()
         if self.state == .connecting {
             self.scheduleReconnect()
         }
