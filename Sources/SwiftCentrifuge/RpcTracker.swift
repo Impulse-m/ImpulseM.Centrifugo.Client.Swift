@@ -108,8 +108,7 @@ internal final class RpcTracker {
     private var pendingAcks: [UInt64] = []
     private var pendingCancels: [UInt64] = []
     private var inFlight: Int = 0
-    private var timerItem: DispatchWorkItem? = nil
-    private var timerDue: UInt64? = nil
+    private var timer: ClientDeadlineTimer = ClientDeadlineTimer()
 
 
     internal init() {
@@ -120,7 +119,7 @@ internal final class RpcTracker {
     /// scheduled for a dead client. The item's closure holds the tracker weakly, so a pending item
     /// never keeps the tracker alive.
     deinit {
-        self.timerItem?.cancel()
+        self.timer.cancel()
     }
 
 
@@ -631,31 +630,16 @@ internal final class RpcTracker {
             return
         }
         let next: UInt64? = self.nextWakeNanos()
-        if next == self.timerDue {
-            return
-        }
-        self.timerItem?.cancel()
-        self.timerItem = nil
-        self.timerDue = nil
-        guard let due: UInt64 = next else {
-            return
-        }
-        let now: UInt64 = client.clock.monotonicNanos()
-        let delay: TimeInterval = due > now ? Double(due - now) / 1e9 : 0
-        let item: DispatchWorkItem = DispatchWorkItem { [weak self] in
+        self.timer.rearm(at: next, on: client, lateGrace: true) { [weak self] in
             self?.onTimer()
         }
-        self.timerItem = item
-        self.timerDue = due
-        client.scheduler.schedule(after: delay, lateGrace: true, item)
     }
 
 
     /// Runs what is due: the call deadlines, the later resends and the route expiries, in time order.
     /// A timer that finds the client gone does nothing and does not re-arm.
     private func onTimer() {
-        self.timerItem = nil
-        self.timerDue = nil
+        self.timer.forget()
         guard let client: CentrifugeClient = self.client else {
             return
         }

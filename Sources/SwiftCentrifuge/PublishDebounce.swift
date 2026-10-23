@@ -26,10 +26,8 @@ internal struct PublishDebounceWindow {
 internal struct PublishDebounceState {
     /// The windows of the subscriptions that have a nonzero window, by channel.
     var windows: [String: PublishDebounceWindow] = [:]
-    /// The timer armed for the earliest open window, or nil.
-    var timer: DispatchWorkItem?
-    /// The deadline the timer was armed for.
-    var timerDeadline: UInt64?
+    /// The timer at the earliest open window end.
+    var timer: ClientDeadlineTimer = ClientDeadlineTimer()
 }
 
 
@@ -61,79 +59,79 @@ internal extension CentrifugeClient {
     /// subscribe reply of the next connect sets the window again.
     func resetPublishDebounce() {
         self.publishDebounce.windows.removeAll()
-        self.cancelPublishDebounceTimer()
+        self.publishDebounce.timer.cancel()
     }
 
 
     /// Publishes for a subscription that has its window. The first publish of a window is sent at once and
     /// opens the window; a publish inside an open window replaces the pending value and completes at once.
-    /// A channel without a window is published as it is.
+    /// A window whose end has passed but whose timer has not run yet ends first, so the publish is judged
+    /// against the window the timer would leave. A channel without a window is published as it is.
     func publishThroughDebounce(channel: String, data: Data, completion: @escaping (Result<CentrifugePublishResult, Error>) -> ()) {
+        let now: UInt64 = self.clock.monotonicNanos()
+        self.endPublishDebounceWindowIfDue(channel: channel, now: now)
         guard var window: PublishDebounceWindow = self.publishDebounce.windows[channel] else {
             self.publish(channel: channel, data: data, completion: completion)
             return
         }
-        if window.deadline != nil {
+        if let deadline: UInt64 = window.deadline, deadline > now {
             window.pending = data
             self.publishDebounce.windows[channel] = window
+            self.rearmPublishDebounce()
             completion(.success(CentrifugePublishResult()))
             return
         }
-        window.deadline = self.clock.monotonicNanos() + window.lengthNanos
+        window.deadline = now + window.lengthNanos
         self.publishDebounce.windows[channel] = window
         self.rearmPublishDebounce()
         self.publish(channel: channel, data: data, completion: completion)
     }
 
 
-    /// Ends the windows that are due. A window with a pending value sends it, and a new window starts; the
-    /// error of that send is not reported, as its completion has already run. The timer then waits for the
-    /// next earliest end.
+    /// Ends the window of a channel when its deadline has passed. A pending value is sent and a new window
+    /// starts; without one the window goes idle. The error of that send is not reported, as its completion has
+    /// already run. The caller re-arms the timer.
+    private func endPublishDebounceWindowIfDue(channel: String, now: UInt64) {
+        guard var window: PublishDebounceWindow = self.publishDebounce.windows[channel],
+              let deadline: UInt64 = window.deadline,
+              deadline <= now else {
+            return
+        }
+        guard let value: Data = window.pending else {
+            window.deadline = nil
+            self.publishDebounce.windows[channel] = window
+            return
+        }
+        window.pending = nil
+        window.deadline = now + window.lengthNanos
+        self.publishDebounce.windows[channel] = window
+        self.publish(channel: channel, data: value, completion: { (_: Result<CentrifugePublishResult, Error>) in })
+    }
+
+
+    /// Runs when the one timer fires: ends every window that is due, then waits for the next earliest end.
     private func publishDebounceTimerFired() {
-        self.publishDebounce.timer = nil
-        self.publishDebounce.timerDeadline = nil
+        self.publishDebounce.timer.forget()
         let now: UInt64 = self.clock.monotonicNanos()
         for channel: String in Array(self.publishDebounce.windows.keys) {
-            guard var window: PublishDebounceWindow = self.publishDebounce.windows[channel], let deadline: UInt64 = window.deadline, deadline <= now else {
-                continue
-            }
-            guard let value: Data = window.pending else {
-                window.deadline = nil
-                self.publishDebounce.windows[channel] = window
-                continue
-            }
-            window.pending = nil
-            window.deadline = now + window.lengthNanos
-            self.publishDebounce.windows[channel] = window
-            self.publish(channel: channel, data: value, completion: { (_: Result<CentrifugePublishResult, Error>) in })
+            self.endPublishDebounceWindowIfDue(channel: channel, now: now)
         }
         self.rearmPublishDebounce()
     }
 
 
-    /// Arms the one timer at the earliest open window end, or cancels it when no window is open. A timer that is
-    /// already armed for that moment stays.
+    /// Keeps the one timer at the earliest open window end, or cancels it when no window is open.
     private func rearmPublishDebounce() {
         let earliest: UInt64? = self.earliestPublishDebounceDeadline()
-        if earliest == self.publishDebounce.timerDeadline {
-            return
+        self.publishDebounce.timer.rearm(at: earliest, on: self, lateGrace: false) { [weak self] in
+            self?.publishDebounceTimerFired()
         }
-        self.cancelPublishDebounceTimer()
-        guard let deadline: UInt64 = earliest else {
-            return
-        }
-        let now: UInt64 = self.clock.monotonicNanos()
-        let delay: TimeInterval = deadline > now ? clientSeconds(nanos: deadline - now) : 0
-        let timer: DispatchWorkItem = DispatchWorkItem { [weak self] in
-            guard let strongSelf: CentrifugeClient = self else { return }
-            strongSelf.publishDebounceTimerFired()
-        }
-        self.publishDebounce.timer = timer
-        self.publishDebounce.timerDeadline = deadline
-        self.scheduleAfter(delay, timer)
     }
 
 
+    /// The earliest open window end, or nil when no window is open. It scans the windows on each window open
+    /// and each timer fire. The bound is the subscriptions of one client: only a subscription with a nonzero
+    /// window has an entry, so the scan never grows with the number of calls or of connections.
     private func earliestPublishDebounceDeadline() -> UInt64? {
         var earliest: UInt64? = nil
         for window: PublishDebounceWindow in self.publishDebounce.windows.values {
@@ -142,12 +140,5 @@ internal extension CentrifugeClient {
             }
         }
         return earliest
-    }
-
-
-    private func cancelPublishDebounceTimer() {
-        self.publishDebounce.timer?.cancel()
-        self.publishDebounce.timer = nil
-        self.publishDebounce.timerDeadline = nil
     }
 }

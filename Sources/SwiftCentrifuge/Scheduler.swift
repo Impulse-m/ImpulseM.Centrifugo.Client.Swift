@@ -109,6 +109,14 @@ internal func clientSeconds(nanos: UInt64) -> TimeInterval {
     return Double(nanos) / 1e9
 }
 
+/// The earlier of an optional moment and a candidate; the candidate when there is none yet.
+internal func earlierNanos(_ current: UInt64?, _ candidate: UInt64) -> UInt64 {
+    guard let known: UInt64 = current else {
+        return candidate
+    }
+    return min(known, candidate)
+}
+
 extension CentrifugeClient {
     /// Runs `item` on syncQueue once `delay` has passed. The hook of the timers that
     /// are not timeouts (reconnect, connection and subscription refresh, resubscribe).
@@ -128,4 +136,55 @@ internal func fullJitterNanos(base: UInt64, attempt: Int, cap: UInt64, random: C
     let scaled: (partialValue: UInt64, overflow: Bool) = base.multipliedReportingOverflow(by: UInt64(1) << UInt64(shift))
     let ceiling: UInt64 = scaled.overflow ? cap : min(scaled.partialValue, cap)
     return random.uniform(0 ... ceiling)
+}
+
+
+/// A client's timer for the earliest of the moments that wait for it: the tracker's deadlines, the window
+/// ends of the publish debounce. The timer is re-armed only when that moment changes, so a client holds one
+/// of these per use and never one per call or subscription.
+internal struct ClientDeadlineTimer {
+    /// The work item of the armed timer, or nil when none is armed.
+    private var item: DispatchWorkItem? = nil
+    /// The moment the armed timer runs at, in monotonic nanoseconds, or nil when none is armed.
+    private var due: UInt64? = nil
+
+
+    /// Keeps the timer at `next`. A timer armed for that moment stays. Any other timer is cancelled, and a
+    /// new one is scheduled at `next` unless it is nil. `onFire` runs on the client's queue when the timer runs.
+    mutating func rearm(
+        at next: UInt64?,
+        on client: CentrifugeClient,
+        lateGrace: Bool,
+        onFire: @escaping () -> Void
+    ) {
+        if next == self.due {
+            return
+        }
+        self.cancel()
+        guard let moment: UInt64 = next else {
+            return
+        }
+        let now: UInt64 = client.clock.monotonicNanos()
+        let delay: TimeInterval = moment > now ? clientSeconds(nanos: moment - now) : 0
+        let item: DispatchWorkItem = DispatchWorkItem {
+            onFire()
+        }
+        self.item = item
+        self.due = moment
+        client.scheduler.schedule(after: delay, lateGrace: lateGrace, item)
+    }
+
+
+    /// Cancels the armed timer, if any.
+    mutating func cancel() {
+        self.item?.cancel()
+        self.forget()
+    }
+
+
+    /// Drops the handle of a timer that has run, so the next `rearm` schedules afresh. It does not cancel.
+    mutating func forget() {
+        self.item = nil
+        self.due = nil
+    }
 }

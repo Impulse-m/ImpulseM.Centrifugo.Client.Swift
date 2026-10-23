@@ -75,14 +75,6 @@ private func debouncedPayloads(_ fake: FakeRpcServer) -> [String] {
 }
 
 
-/// The scheduled timers that are not timeouts. A publish arms no such timer; the window timer is one.
-private func nonLateCallCount(_ scheduler: ManualScheduler) -> Int {
-    return scheduler.scheduledCalls.filter { (call: ScheduledCall) -> Bool in
-        return !call.lateGrace
-    }.count
-}
-
-
 @Suite(.serialized, .timeLimit(.minutes(1)))
 final class PublishDebounceTests: @unchecked Sendable {
     private let fake: FakeRpcServer
@@ -157,16 +149,6 @@ final class PublishDebounceTests: @unchecked Sendable {
     }
 
 
-    /// Returns once every block the client's queue had before this call has run.
-    private func drain(_ client: CentrifugeClient) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.syncQueue.async {
-                continuation.resume()
-            }
-        }
-    }
-
-
     /// Returns once the server has received a marker publish that the client sent after everything it had queued.
     private func syncWithServer(_ client: CentrifugeClient) async {
         let marker: Data = Data(UUID().uuidString.utf8)
@@ -192,7 +174,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         publish(session, "2", second)
         publish(session, "3", third)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
 
         #expect(second.successes == 1, "a coalesced publish completes at once")
         #expect(third.successes == 1, "a coalesced publish completes at once")
@@ -222,7 +204,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         await fulfillment(of: first.finished, within: 5)
         await session.scheduler.advance(by: debounceWindowSeconds)
         await session.scheduler.advance(by: debounceWindowSeconds)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
 
         publish(session, "2", second)
         await fake.awaitArrivals("publish after an idle window") { (command: RpcCommand) -> Bool in
@@ -230,6 +212,29 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         #expect(debouncedPayloads(fake) == ["1", "2"])
         await fulfillment(of: second.finished, within: 5)
+        #expect(second.successes == 1)
+    }
+
+
+    @Test func publishAtTheWindowEndIsSentAtOnceBeforeTheTimerRuns() async throws {
+        let session: DebounceSession = try await connectAndSubscribe(windowMillis: debounceWindowMillis)
+        let first: CompletionLog = CompletionLog()
+        let second: CompletionLog = CompletionLog()
+
+        publish(session, "1", first)
+        await fake.awaitArrivals("first publish") { (command: RpcCommand) -> Bool in
+            return isDebouncedPublish(command, "1")
+        }
+        await fulfillment(of: first.finished, within: 5)
+        // The clock reaches the window end without running the timer, so the window is still listed as open.
+        session.scheduler.passTime(by: debounceWindowSeconds)
+        publish(session, "2", second)
+        await fake.awaitArrivals("publish at the window end") { (command: RpcCommand) -> Bool in
+            return isDebouncedPublish(command, "2")
+        }
+        await fulfillment(of: second.finished, within: 5)
+
+        #expect(debouncedPayloads(fake) == ["1", "2"], "a publish at the window end is not held back")
         #expect(second.successes == 1)
     }
 
@@ -245,9 +250,9 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         await fulfillment(of: first.finished, within: 5)
         publish(session, "2", second)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
         session.subscription.unsubscribe()
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
         await session.scheduler.advance(by: 2 * debounceWindowSeconds)
         await syncWithServer(session.client)
 
@@ -267,12 +272,12 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         await fulfillment(of: first.finished, within: 5)
         publish(session, "2", second)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
 
         let connectsBefore: Int = session.connected.connectingEvents
         fake.server.closeConnection()
         await session.connected.awaitConnecting(times: connectsBefore + 1)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
         let resubscribed: Expectation = Expectation("resubscribed")
         session.subDelegate.onSub = {
             resubscribed.fulfill()
@@ -295,8 +300,8 @@ final class PublishDebounceTests: @unchecked Sendable {
         let first: CompletionLog = CompletionLog()
         let second: CompletionLog = CompletionLog()
         let third: CompletionLog = CompletionLog()
-        await drain(session.client)
-        let timedBefore: Int = nonLateCallCount(session.scheduler)
+        await awaitSyncQueue(session.client)
+        let timedBefore: Int = nonLateTimerCount(session.scheduler)
 
         publish(session, "1", first)
         publish(session, "2", second)
@@ -306,7 +311,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
 
         #expect(debouncedPayloads(fake) == ["1", "2", "3"])
-        #expect(nonLateCallCount(session.scheduler) == timedBefore, "no window timer is armed")
+        #expect(nonLateTimerCount(session.scheduler) == timedBefore, "no window timer is armed")
     }
 
 
@@ -324,7 +329,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         #expect(lastNonLateTimerDelay(session.scheduler) == 2147483.647, "the window is capped at 2^31 - 1 ms")
 
         publish(session, "2", second)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
         // One millisecond short of the cap: the window is still open.
         await session.scheduler.advance(by: 2147483.646)
         await syncWithServer(session.client)
@@ -351,7 +356,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         await fulfillment(of: first.finished, within: 5)
         publish(session, refusedPayload, refused)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
 
         await session.scheduler.advance(by: debounceWindowSeconds)
         await fake.awaitArrivals("refused publish sent by the timer") { (command: RpcCommand) -> Bool in
@@ -361,7 +366,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         #expect(refused.successes == 1, "the coalesced publish completed at once")
 
         publish(session, "3", third)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
         await session.scheduler.advance(by: debounceWindowSeconds)
         await fake.awaitArrivals("publish of the next window") { (command: RpcCommand) -> Bool in
             return isDebouncedPublish(command, "3")
@@ -386,7 +391,7 @@ final class PublishDebounceTests: @unchecked Sendable {
         }
         await fulfillment(of: first.finished, within: 5)
         publish(session, "2", second)
-        await drain(session.client)
+        await awaitSyncQueue(session.client)
 
         await session.scheduler.advance(by: debounceWindowSeconds)
         await fake.awaitArrivals("coalesced publish sent") { (command: RpcCommand) -> Bool in
