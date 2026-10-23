@@ -2,7 +2,7 @@
 
 ## About this fork
 
-This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained alongside the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) of the same organization. The public API matches upstream, so the upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
+This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), maintained alongside the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) of the same organization. The upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well. Version 2.0.0 adds the client features of the sibling SDKs and has a few breaking changes: see [MIGRATION.md](MIGRATION.md).
 
 Sibling SDKs from the same organization:
 
