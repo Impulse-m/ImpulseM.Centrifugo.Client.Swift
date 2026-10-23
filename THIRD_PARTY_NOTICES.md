@@ -26,7 +26,10 @@ Four files derive from Starscream version 3. They keep their original headers.
 - Copyright (c) 2023 Centrifugal Labs LTD.
 - License text: [licenses/MIT-protocol.txt](licenses/MIT-protocol.txt).
 
-## Fossil delta format (license to be confirmed)
+## Fossil delta format (BSD-2-Clause)
 
-- `Sources/SwiftCentrifuge/DeltaFossil.swift` implements the apply step of the Fossil SCM delta format. Its header credits the author of the original algorithm, D. Richard Hipp.
-- The license of the reference implementation is not recorded in this file yet. This is an open item: confirm it, and add its license text here, before the next release.
+- `Sources/SwiftCentrifuge/DeltaFossil.swift` is a port of the apply step (`delta_apply`) of the Fossil SCM delta code, `src/delta.c`, with its `getInt` decoder and its checksum. The file header credits the author of the original algorithm, D. Richard Hipp.
+- Source: https://fossil-scm.org/home/doc/trunk/src/delta.c. Its header reads "Copyright (c) 2006 D. Richard Hipp" and states that the code is under the Simplified BSD License (2-Clause).
+- License text: [licenses/BSD-2-Clause-fossil.txt](licenses/BSD-2-Clause-fossil.txt), copied verbatim from the Fossil SCM license page, https://fossil-scm.org/home/doc/trunk/COPYRIGHT-BSD2.txt (the page is the source of the text; its copyright line reads "Copyright 2007 D. Richard Hipp. All rights reserved.").
+- Compared with the C original, the value table, the checksum and the order of the delta checks follow `delta.c`. The Swift code was not compared with other ports of the format.
+- Changes: the file keeps only the apply step. The changes are recorded in the git history of this repository.

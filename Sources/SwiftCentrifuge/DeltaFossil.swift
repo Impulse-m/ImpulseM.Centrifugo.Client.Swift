@@ -4,6 +4,7 @@
 //
 // Fossil SCM delta compression algorithm, this is only the applyDelta part required by the client.
 // Author of the original algorithm: D. Richard Hipp
+// Copyright (c) 2006 D. Richard Hipp. Simplified BSD License (2-Clause), see THIRD_PARTY_NOTICES.md
 //
 
 import Foundation

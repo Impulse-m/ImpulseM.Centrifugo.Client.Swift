@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
     s.summary               = 'Centrifugo and Centrifuge client in Swift'
 
     s.author                = { 'Alexander Emelin' => 'frvzmb@gmail.com' }
-    s.license               = { :type => 'MIT AND Apache-2.0', :file => 'LICENSE' }
+    s.license               = { :type => 'MIT AND Apache-2.0 AND BSD-2-Clause', :file => 'LICENSE' }
     s.platforms             = { :ios => '12.0' }
     s.ios.deployment_target = '12.0'
 
