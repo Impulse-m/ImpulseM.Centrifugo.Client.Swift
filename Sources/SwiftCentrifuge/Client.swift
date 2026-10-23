@@ -328,7 +328,7 @@ public class CentrifugeClient: @unchecked Sendable {
     internal var poolTokenSource: RpcPoolTokenSource? = nil
     // The ping watchdog (the startWaitPing group below) reads and arms these three.
     fileprivate var pingTimer: DispatchWorkItem?
-    fileprivate var pingInterval: UInt32 = 0
+    internal var pingInterval: UInt32 = 0
     internal var sendPong: Bool = false
     // The ping watchdog: the clock time of the last decoded batch that carried a reply.
     fileprivate var lastReplyNanos: UInt64 = 0
