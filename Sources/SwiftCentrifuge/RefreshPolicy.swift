@@ -60,6 +60,25 @@ internal func refreshFailureAction(_ error: Error) -> RefreshFailureAction {
 }
 
 
+/// Runs the step of a failed timer refresh that `refreshFailureAction` picks. The connection and a subscription both
+/// call it: the policy is the same, and only the side effects differ, so each passes its own closures.
+internal func applyRefreshFailure(
+    _ error: Error,
+    keep: () -> Void,
+    retry: (Bool) -> Void,
+    end: (UInt32, String) -> Void
+) {
+    switch refreshFailureAction(error) {
+    case .keep:
+        keep()
+    case .retry(let refusedExpired):
+        retry(refusedExpired)
+    case .end(let code, let message):
+        end(code, message)
+    }
+}
+
+
 /// The delay of the retry after `step` consecutive failed timer refreshes, in seconds, as the Java SDK
 /// computes it (AuthRefresh). The ceiling is max(20 s, min(tokenRetryCap, 20 s * 2^step)). The delay is
 /// min(ceiling, 10 s + uniform[0, min(ceiling, 10 s * 2^step)]), with the draw taken from `random`.
@@ -102,6 +121,56 @@ internal extension CentrifugeSubscription {
     func subscriptionTokenIsRefused(_ token: String) -> Bool {
         let stopOnRefusedToken: Bool = centrifuge?.config.stopOnRefusedToken ?? false
         return refusedTokenIsNotResent(token: token, refused: refreshRefusedToken, stopOnRefusedToken: stopOnRefusedToken)
+    }
+
+    /// Starts the refresh chain of the subscribed session after `delay`. One chain per subscribed session: a new step
+    /// replaces the pending one, and the chain stops at its next step once the session it was started for is over
+    /// (a resubscribe starts its own chain).
+    func startSubscriptionRefresh(after delay: TimeInterval) {
+        self.refreshTask?.cancel()
+        let attempt: UInt64 = self.attempt
+        let refreshTask: DispatchWorkItem = DispatchWorkItem { [weak self] in
+            guard let strongSelf = self else { return }
+            strongSelf.centrifuge?.syncQueue.async { [weak self] in
+                guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
+                strongSelf.getSubscriptionToken(channel: strongSelf.channel, completion: { [weak self] result in
+                    guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
+                    switch result {
+                    case .success(let token):
+                        if token == "" {
+                            strongSelf.failUnauthorized(sendUnsubscribe: true)
+                            return
+                        }
+                        // A token the server refused as expired is not sent again (stopOnRefusedToken).
+                        if strongSelf.subscriptionTokenIsRefused(token) {
+                            return
+                        }
+                        strongSelf.refreshWithToken(token: token, attempt: attempt)
+                    case .failure(let error):
+                        guard strongSelf.centrifuge != nil else { return }
+                        if let centrifugeError = error as? CentrifugeError {
+                            switch centrifugeError {
+                            case .unauthorized:
+                                strongSelf.failUnauthorized(sendUnsubscribe: true)
+                                return
+                            default:
+                                break
+                            }
+                        }
+                        strongSelf.scheduleSubscriptionRefreshRetry()
+                        guard let strongSelf = self else { return }
+                        strongSelf.delegate?.onError(
+                            strongSelf,
+                            CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionTokenError(error: error))
+                        )
+                        return
+                    }
+                })
+            }
+        }
+
+        self.centrifuge?.scheduleAfter(delay, refreshTask)
+        self.refreshTask = refreshTask
     }
 
     /// Arms the retry of a failed subscription refresh after the delay of its failure count, and moves the count on.

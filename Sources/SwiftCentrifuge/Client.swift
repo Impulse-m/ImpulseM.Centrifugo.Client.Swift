@@ -318,7 +318,7 @@ public class CentrifugeClient: @unchecked Sendable {
     fileprivate var serverSubs = [String: ServerSubscription]()
     fileprivate var reconnectAttempts = 0
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
-    fileprivate var refreshTask: DispatchWorkItem?
+    internal var refreshTask: DispatchWorkItem?
     internal var refreshRequired: Bool = false
     // Set by every disconnect: true when it is the unauthorized one, which ends the session. The rpc pool
     // reads it while the client is disconnected (RpcPool.swift).
@@ -364,24 +364,30 @@ public class CentrifugeClient: @unchecked Sendable {
         }
         
         let clock: ClientClock = SystemClientClock()
-        let seams: (syncQueue: DispatchQueue, scheduler: ClientScheduler) = CentrifugeClient.makeQueueAndScheduler(clock: clock) { queue, queueClock in
+        let setup: ClientSetup = CentrifugeClient.makeSetup(endpoint: endpoint, config: config, clock: clock) { queue, queueClock in
             return DispatchClientScheduler(queue: queue, clock: queueClock)
         }
-        self.syncQueue = seams.syncQueue
+        self.url = endpoint
+        self.config = config
+        self.delegate = delegate
+        self.log = setup.log
+        self.token = config.token
+        if config.data != nil {
+            self.data = config.data
+        }
+        self.syncQueue = setup.syncQueue
         self.clock = clock
         self.random = SystemClientRandom()
-        self.scheduler = seams.scheduler
-        self.configError = clientConfigurationError(config)
-
-        self.request = CentrifugeClient.makeRequest(endpoint: self.url, config: self.config)
-        CentrifugeClient.logTransportChoice(config: self.config, log: self.log)
+        self.scheduler = setup.scheduler
+        self.configError = setup.configError
+        self.request = setup.request
         self.rpcTracker.bind(client: self)
     }
 
     /// Initialize client with the clock and scheduler seams (see Scheduler.swift). The public
     /// initializer above passes the production values; tests reach this one through
     /// `@testable import`. Both are designated (a subclass calls the public one with `super.init`),
-    /// so the shared setup lives in `makeQueueAndScheduler`, not in a convenience initializer.
+    /// so the shared setup lives in `makeSetup`, not in a convenience initializer.
     internal init(
         endpoint: String,
         config: CentrifugeClientConfig,
@@ -390,31 +396,54 @@ public class CentrifugeClient: @unchecked Sendable {
         schedulerFactory: ClientSchedulerFactory,
         random: ClientRandom
     ) {
+        let setup: ClientSetup = CentrifugeClient.makeSetup(endpoint: endpoint, config: config, clock: clock, schedulerFactory: schedulerFactory)
         self.url = endpoint
         self.config = config
         self.delegate = delegate
-        self.log = config.logger ?? EmptyLogger.instance
+        self.log = setup.log
         self.token = config.token
         if config.data != nil {
             self.data = config.data
         }
-        let seams: (syncQueue: DispatchQueue, scheduler: ClientScheduler) = CentrifugeClient.makeQueueAndScheduler(clock: clock, schedulerFactory: schedulerFactory)
-        self.syncQueue = seams.syncQueue
+        self.syncQueue = setup.syncQueue
         self.clock = clock
         self.random = random
-        self.scheduler = seams.scheduler
-        self.configError = clientConfigurationError(config)
-        self.request = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
-        CentrifugeClient.logTransportChoice(config: config, log: self.log)
+        self.scheduler = setup.scheduler
+        self.configError = setup.configError
+        self.request = setup.request
         self.rpcTracker.bind(client: self)
     }
 
-    /// The client's queue and scheduler, made the same way by both initializers.
-    private static func makeQueueAndScheduler(clock: ClientClock, schedulerFactory: ClientSchedulerFactory) -> (syncQueue: DispatchQueue, scheduler: ClientScheduler) {
+    /// The values that both initializers take from one setup function.
+    private typealias ClientSetup = (
+        syncQueue: DispatchQueue,
+        scheduler: ClientScheduler,
+        configError: CentrifugeError?,
+        request: URLRequest,
+        log: CentrifugeLogger
+    )
+
+    /// The setup both initializers share: the queue and its scheduler, the configuration error, the request and the
+    /// log. Only the random source differs between the initializers, and each sets it itself.
+    private static func makeSetup(
+        endpoint: String,
+        config: CentrifugeClientConfig,
+        clock: ClientClock,
+        schedulerFactory: ClientSchedulerFactory
+    ) -> ClientSetup {
+        let log: CentrifugeLogger = config.logger ?? EmptyLogger.instance
         let queueID: String = UUID().uuidString
         let syncQueue: DispatchQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
         let scheduler: ClientScheduler = schedulerFactory(syncQueue, clock)
-        return (syncQueue: syncQueue, scheduler: scheduler)
+        let request: URLRequest = CentrifugeClient.makeRequest(endpoint: endpoint, config: config)
+        CentrifugeClient.logTransportChoice(config: config, log: log)
+        return (
+            syncQueue: syncQueue,
+            scheduler: scheduler,
+            configError: clientConfigurationError(config),
+            request: request,
+            log: log
+        )
     }
     
     /**
@@ -668,19 +697,17 @@ internal extension CentrifugeClient {
                             CentrifugeErrorEvent(error: CentrifugeError.refreshError(error: err))
                         )
                     }
-                    switch refreshFailureAction(err) {
-                    case .keep:
+                    applyRefreshFailure(err, keep: {
                         return
-                    case .retry(let refusedExpired):
+                    }, retry: { (refusedExpired: Bool) -> Void in
                         if refusedExpired {
                             strongSelf.refreshState.refusedToken = token
                         }
                         strongSelf.scheduleTimerRefreshRetry()
-                        return
-                    case .end(let code, let message):
+                    }, end: { (code: UInt32, message: String) -> Void in
                         strongSelf.processDisconnect(code: code, reason: message, reconnect: false)
-                        return
-                    }
+                    })
+                    return
                 }
                 if let res = result {
                     strongSelf.acceptRefreshReply(res)
@@ -1383,83 +1410,18 @@ fileprivate extension CentrifugeClient {
 }
 
 
-// The connection refresh is reached from Refresh.swift, so it is internal (the extension is not fileprivate).
-internal extension CentrifugeClient {
-    func startConnectionRefresh(after delay: TimeInterval) {
-        // One refresh chain per connection: a new step replaces the pending one, and
-        // the chain stops at its next step once the connection it was started for is
-        // gone - a token request or refresh command still in flight across a
-        // reconnect must not start a second chain on the new connection.
-        self.refreshTask?.cancel()
-        let transportId = self.transportId
-        let refreshTask = DispatchWorkItem { [weak self] in
-            guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
-            guard strongSelf.config.tokenGetter != nil || strongSelf.config.tokenExchange != nil else { return }
-            // Go through getConnectionToken rather than calling config.tokenGetter
-            // directly: the app completes the getter on whatever thread it likes,
-            // and everything below - failUnauthorized (which runs processDisconnect,
-            // asserted to be on syncQueue), the delegate callback, and rescheduling
-            // the refresh - is only safe on syncQueue.
-            let generation: UInt64 = strongSelf.beginTimerFetch()
-            strongSelf.getConnectionToken(completion: { [weak self] result in
-                guard let strongSelf = self else { return }
-                strongSelf.endTimerFetch()
-                // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
-                guard strongSelf.isCurrentConnection(transportId), !strongSelf.timerFetchIsSuperseded(generation) else { return }
-                switch result {
-                case .success(let token):
-                    if token == "" {
-                        strongSelf.failUnauthorized();
-                        return
-                    }
-                    // A token the server refused as expired is not sent again (stopOnRefusedToken): the
-                    // connection is left to expire, and the next connect asks the getter.
-                    if strongSelf.connectionTokenIsRefused(token) {
-                        strongSelf.refreshRequired = true
-                        return
-                    }
-                    strongSelf.refreshWithToken(token: token, transportId: transportId)
-                case .failure(let error):
-                    if let centrifugeError = error as? CentrifugeError {
-                        switch centrifugeError {
-                        case .unauthorized:
-                            strongSelf.failUnauthorized();
-                            return
-                        default:
-                            break
-                        }
-                    }
-                    // Retry with backoff. Without rescheduling here a single failing
-                    // token getter stops the refresh loop for the entire lifetime of
-                    // the connection, and the server drops the client once the token
-                    // expires. Scheduled before the callout because delegate callbacks run
-                    // inline and may re-enter the client.
-                    strongSelf.scheduleTimerRefreshRetry()
-                    strongSelf.delegate?.onError(
-                        strongSelf,
-                        CentrifugeErrorEvent(error: CentrifugeError.tokenError(error: error))
-                    )
-                }
-            })
-        }
-        
-        self.scheduleAfter(delay, refreshTask)
-        self.refreshTask = refreshTask
-    }
-
-    func stopConnectionRefresh() {
-        self.refreshTask?.cancel()
-    }
-}
-
-
 // The ping watchdog reaches processDisconnect from Client+PingWatchdog.swift, so this extension is internal.
 internal extension CentrifugeClient {
     private func stopReconnect() {
         self.reconnectTask?.cancel()
         self.reconnectTask = nil
     }
-    
+
+    /// The server ended the session as unauthorized: the connection is disconnected for good.
+    func failUnauthorized() -> Void {
+        self.processDisconnect(code: disconnectedCodeUnauthorized, reason: "unauthorized", reconnect: false)
+    }
+
     // Caller must synchronize access.
     func processDisconnect(code: UInt32, reason: String, reconnect: Bool) {
         assertIsOnQueue(syncQueue)
@@ -1856,9 +1818,5 @@ fileprivate extension CentrifugeClient {
         } catch {
             completion(error)
         }
-    }
-    
-    private func failUnauthorized() -> Void {
-        self.processDisconnect(code: disconnectedCodeUnauthorized, reason: "unauthorized", reconnect: false)
     }
 }

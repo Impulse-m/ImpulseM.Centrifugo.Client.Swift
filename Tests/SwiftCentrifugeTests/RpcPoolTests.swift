@@ -257,7 +257,9 @@ final class RpcPoolTests: @unchecked Sendable {
         #expect(pool.stats() == CentrifugeRpcPoolStats(connections: 1, inflight: 0, queued: 0))
 
         // The connection stays until the idle span has passed on the fake clock, then the idle timer closes it.
-        await setup.scheduler.advance(by: 1.0)
+        await setup.scheduler.advance(by: 0.5)
+        #expect(pool.stats() == CentrifugeRpcPoolStats(connections: 1, inflight: 0, queued: 0))
+        await setup.scheduler.advance(by: 0.5)
         #expect(pool.stats() == CentrifugeRpcPoolStats(connections: 0, inflight: 0, queued: 0))
         withExtendedLifetime(delegate) {}
     }

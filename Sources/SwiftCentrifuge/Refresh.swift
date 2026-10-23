@@ -284,6 +284,72 @@ internal extension CentrifugeClient {
     }
 
 
+    /// Starts the timer refresh chain of the connection after `delay`. One chain per connection: a new step replaces
+    /// the pending one, and the chain stops at its next step once the connection it was started for is gone.
+    func startConnectionRefresh(after delay: TimeInterval) {
+        self.refreshTask?.cancel()
+        let transportId = self.transportId
+        let refreshTask = DispatchWorkItem { [weak self] in
+            guard let strongSelf = self, strongSelf.isCurrentConnection(transportId) else { return }
+            guard strongSelf.config.tokenGetter != nil || strongSelf.config.tokenExchange != nil else { return }
+            // Go through getConnectionToken rather than calling config.tokenGetter
+            // directly: the app completes the getter on whatever thread it likes,
+            // and everything below - failUnauthorized (which runs processDisconnect,
+            // asserted to be on syncQueue), the delegate callback, and rescheduling
+            // the refresh - is only safe on syncQueue.
+            let generation: UInt64 = strongSelf.beginTimerFetch()
+            strongSelf.getConnectionToken(completion: { [weak self] result in
+                guard let strongSelf = self else { return }
+                strongSelf.endTimerFetch()
+                // A refresh() call admitted since the fetch started supersedes it: the token is not sent.
+                guard strongSelf.isCurrentConnection(transportId), !strongSelf.timerFetchIsSuperseded(generation) else { return }
+                switch result {
+                case .success(let token):
+                    if token == "" {
+                        strongSelf.failUnauthorized()
+                        return
+                    }
+                    // A token the server refused as expired is not sent again (stopOnRefusedToken): the
+                    // connection is left to expire, and the next connect asks the getter.
+                    if strongSelf.connectionTokenIsRefused(token) {
+                        strongSelf.refreshRequired = true
+                        return
+                    }
+                    strongSelf.refreshWithToken(token: token, transportId: transportId)
+                case .failure(let error):
+                    if let centrifugeError = error as? CentrifugeError {
+                        switch centrifugeError {
+                        case .unauthorized:
+                            strongSelf.failUnauthorized()
+                            return
+                        default:
+                            break
+                        }
+                    }
+                    // Retry with backoff. Without rescheduling here a single failing
+                    // token getter stops the refresh loop for the entire lifetime of
+                    // the connection, and the server drops the client once the token
+                    // expires. Scheduled before the callout because delegate callbacks run
+                    // inline and may re-enter the client.
+                    strongSelf.scheduleTimerRefreshRetry()
+                    strongSelf.delegate?.onError(
+                        strongSelf,
+                        CentrifugeErrorEvent(error: CentrifugeError.tokenError(error: error))
+                    )
+                }
+            })
+        }
+
+        self.scheduleAfter(delay, refreshTask)
+        self.refreshTask = refreshTask
+    }
+
+    /// Cancels the timer refresh chain of the connection.
+    func stopConnectionRefresh() {
+        self.refreshTask?.cancel()
+    }
+
+
     /// Arms the retry of a failed timer refresh, after the delay of the failure count. The count moves on.
     func scheduleTimerRefreshRetry() {
         let delay: TimeInterval = refreshRetryDelay(step: refreshState.failures, tokenRetryCap: config.tokenRetryCap, random: random)

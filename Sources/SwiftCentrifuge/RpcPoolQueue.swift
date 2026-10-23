@@ -26,8 +26,9 @@ internal final class RpcPoolCall {
     /// Whether the call still holds a slot of `connection`: set at placement, cleared when the connection answers.
     internal var holdsSlot: Bool = false
 
-    /// Whether the completion has run (or is running). A settled call may still hold its slot until its answer.
-    internal var settled: Bool = false
+    /// Claims the completion: the first settlement runs it, and a later one does nothing. A settled call may still
+    /// hold its slot until its connection answers.
+    internal let settleOnce: CallOnce = CallOnce()
 
 
     internal init(

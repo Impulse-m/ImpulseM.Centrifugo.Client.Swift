@@ -107,7 +107,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
     fileprivate var delta: String?
     fileprivate var tagsFilter: CentrifugeFilterNode?
     fileprivate var deltaNegotiated: Bool = false
-    fileprivate var refreshTask: DispatchWorkItem?
+    internal var refreshTask: DispatchWorkItem?
     fileprivate var resubscribeTask: DispatchWorkItem?
     fileprivate var resubscribeAttempts: Int = 0
     // Consecutive failed refreshes of the token, and the token the server refused as expired.
@@ -117,7 +117,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
     // Changes on every subscribe attempt and every state change; token and state
     // requests, subscribe replies and refresh steps check it and are dropped when
     // they belong to an attempt or session that is over. Touched only on syncQueue.
-    fileprivate var attempt: UInt64 = 0
+    internal var attempt: UInt64 = 0
     // Set once the subscription is removed from the client: it can't subscribe
     // again (the client no longer routes anything to it). Touched only on syncQueue.
     fileprivate var removed = false
@@ -452,7 +452,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
         }
     }
     
-    private func getSubscriptionToken(channel: String, completion: @escaping (Result<String, Error>)->()) {
+    func getSubscriptionToken(channel: String, completion: @escaping (Result<String, Error>)->()) {
         self.centrifuge?.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
             let once = CallOnce()
@@ -466,58 +466,8 @@ public class CentrifugeSubscription: @unchecked Sendable {
         }
     }
     
-    private func isCurrentSession(_ attempt: UInt64) -> Bool {
+    func isCurrentSession(_ attempt: UInt64) -> Bool {
         return self.attempt == attempt && self.state == .subscribed
-    }
-
-    func startSubscriptionRefresh(after delay: TimeInterval) {
-        // One refresh chain per subscribed session: a new step replaces the pending
-        // one, and the chain stops at its next step once the session it was started
-        // for is over (a resubscribe starts its own chain).
-        self.refreshTask?.cancel()
-        let attempt = self.attempt
-        let refreshTask = DispatchWorkItem { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.centrifuge?.syncQueue.async { [weak self] in
-                guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
-                strongSelf.getSubscriptionToken(channel: strongSelf.channel, completion: { [weak self] result in
-                    guard let strongSelf = self, strongSelf.isCurrentSession(attempt) else { return }
-                    switch result {
-                    case .success(let token):
-                        if token == "" {
-                            strongSelf.failUnauthorized(sendUnsubscribe: true);
-                            return
-                        }
-                        // A token the server refused as expired is not sent again (stopOnRefusedToken).
-                        if strongSelf.subscriptionTokenIsRefused(token) {
-                            return
-                        }
-                        strongSelf.refreshWithToken(token: token, attempt: attempt)
-                    case .failure(let error):
-                        guard strongSelf.centrifuge != nil else { return }
-                        if let centrifugeError = error as? CentrifugeError {
-                            switch centrifugeError {
-                            case .unauthorized:
-                                strongSelf.failUnauthorized(sendUnsubscribe: true);
-                                return
-                            default:
-                                break
-                            }
-                        }
-                        strongSelf.scheduleSubscriptionRefreshRetry()
-                        guard let strongSelf = self else { return }
-                        strongSelf.delegate?.onError(
-                            strongSelf,
-                            CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionTokenError(error: error))
-                        )
-                        return
-                    }
-                })
-            }
-        }
-        
-        self.centrifuge?.scheduleAfter(delay, refreshTask)
-        self.refreshTask = refreshTask
     }
 
     func refreshWithToken(token: String, attempt: UInt64) {
@@ -535,29 +485,26 @@ public class CentrifugeSubscription: @unchecked Sendable {
                     if case CentrifugeError.clientDisconnected = err {
                         return
                     }
-                    switch refreshFailureAction(err) {
-                    case .keep:
+                    applyRefreshFailure(err, keep: {
                         // Reported, not retried: the subscription keeps its token until it expires.
                         strongSelf.delegate?.onError(
                             strongSelf,
                             CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionRefreshError(error: err))
                         )
-                        return
-                    case .end(let code, let message):
-                        self?.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
-                        return
-                    case .retry(let refusedExpired):
+                    }, retry: { (refusedExpired: Bool) -> Void in
                         if refusedExpired {
                             strongSelf.refreshRefusedToken = token
                         }
-                    }
-                    // Retry with backoff. Scheduled before the callout because
-                    // delegate callbacks run inline and may re-enter the client.
-                    strongSelf.scheduleSubscriptionRefreshRetry()
-                    strongSelf.delegate?.onError(
-                        strongSelf,
-                        CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionRefreshError(error: err))
-                    )
+                        // Retry with backoff. Scheduled before the callout because
+                        // delegate callbacks run inline and may re-enter the client.
+                        strongSelf.scheduleSubscriptionRefreshRetry()
+                        strongSelf.delegate?.onError(
+                            strongSelf,
+                            CentrifugeSubscriptionErrorEvent(error: CentrifugeError.subscriptionRefreshError(error: err))
+                        )
+                    }, end: { (code: UInt32, message: String) -> Void in
+                        strongSelf.processUnsubscribe(sendUnsubscribe: true, code: code, reason: message)
+                    })
                     return
                 }
                 if let res = result {
@@ -761,7 +708,7 @@ public class CentrifugeSubscription: @unchecked Sendable {
         }
     }
 
-    private func failUnauthorized(sendUnsubscribe: Bool) -> Void {
+    func failUnauthorized(sendUnsubscribe: Bool) -> Void {
         self.processUnsubscribe(sendUnsubscribe: sendUnsubscribe, code: unsubscribedCodeUnauthorized, reason: "unauthorized")
     }
 

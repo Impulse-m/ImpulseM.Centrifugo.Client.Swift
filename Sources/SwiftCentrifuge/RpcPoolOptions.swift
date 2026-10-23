@@ -152,7 +152,7 @@ internal func poolConfigurationError(_ options: CentrifugeRpcPoolOptions) -> Cen
     if !isPoolTimerSpan(options.idleTimeout, allowZero: true) {
         return CentrifugeError.configurationError(message: "idleTimeout must be 0 or a span of at most 2147483.647 seconds")
     }
-    if !isPoolTimerSpan(options.timeout, allowZero: false) {
+    if !isValidRpcTimeout(options.timeout, limit: maxPoolTimerSeconds) {
         return CentrifugeError.configurationError(message: "timeout must be a positive span of at most 2147483.647 seconds")
     }
     if !isPoolTimerSpan(options.minReconnectDelay, allowZero: true) || !isPoolTimerSpan(options.maxReconnectDelay, allowZero: true) {
@@ -176,13 +176,17 @@ internal func poolCallConfigurationError(
         return CentrifugeError.configurationError(message: "the affinity header is set by the affinity option, not by headers")
     }
     let timeout: TimeInterval = options.timeout ?? poolTimeout
-    if !(timeout.isFinite && timeout > 0) {
-        return CentrifugeError.configurationError(message: "timeout must be a positive number of seconds")
-    }
-    if timeout > poolTimeout {
-        return CentrifugeError.configurationError(message: "timeout is above the pool timeout, which bounds the reply of a connection")
+    if !isValidRpcTimeout(timeout, limit: poolTimeout) {
+        return CentrifugeError.configurationError(message: "timeout must be a positive number of seconds, at most the pool timeout")
     }
     return nil
+}
+
+
+/// Whether a call timeout in seconds can be used: finite, above zero, and no more than `limit`. The one rule of the
+/// pool's options, of a call's options and of a tracked call's options.
+internal func isValidRpcTimeout(_ seconds: TimeInterval, limit: TimeInterval) -> Bool {
+    return seconds.isFinite && seconds > 0 && seconds <= limit
 }
 
 

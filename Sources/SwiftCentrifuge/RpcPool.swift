@@ -6,18 +6,19 @@ import Foundation
 //
 // Timers come from the main client's scheduler: one idle timer per connection, and one deadline timer for the
 // waiting calls, which also wakes at the end of an endpoint's hold (after a connection ended for good). A call in
-// flight carries its own deadline on its connection. This slice has no token source, no resend, no redirect: a call fails with the answer of its
-// connection, and a call on a connection that is lost fails with that connection's error.
+// flight carries its own deadline on its connection. The pool does not send tokens, resend, reroute or redirect yet:
+// a call fails with the answer of its connection, and a call on a connection that is lost fails with that
+// connection's error.
 
 /// A pool of connections for plain rpc calls: several connections per endpoint, a window of calls on each, and a
 /// bounded wait queue. The calls are plain requests, so their methods must be safe to run more than once.
 public final class CentrifugeRpcPool {
+    /// The queue of the pool: the main client's. Its state is touched on it only, and it runs the completions.
+    internal let queue: DispatchQueue
+
     /// The client whose queue, clock, scheduler and random source the pool shares, and whose session state (ended,
     /// disconnected) decides the refusal of a call.
     private let main: CentrifugeClient
-
-    /// The queue of the pool: the main client's. Its state is touched on it only, and it runs the completions.
-    internal let queue: DispatchQueue
 
     private let options: CentrifugeRpcPoolOptions
 
@@ -101,8 +102,9 @@ public final class CentrifugeRpcPool {
             options: options,
             completion: completion
         )
-        self.queue.async { [weak self] in
-            self?.admit(call)
+        // The admission holds the pool until it runs: a pool released right after this call still settles it.
+        self.queue.async {
+            self.admit(call)
         }
         let queue: DispatchQueue = self.queue
         return CentrifugeRpcCall(onCancel: { [weak self] () -> Void in
@@ -139,12 +141,12 @@ public final class CentrifugeRpcPool {
     /// The admission checks, in order: configuration, closed, the main client's session, the options of the call,
     /// then placement (a live slot, else the line under `maxQueued`).
     private func admit(_ call: RpcPoolCall) {
-        if let error: CentrifugeError = configError {
-            settle(call, .failure(error))
-            return
-        }
         if closed {
             settle(call, .failure(CentrifugeError.clientRejected(code: 4, message: "rpc pool is closed")))
+            return
+        }
+        if let error: CentrifugeError = configError {
+            settle(call, .failure(error))
             return
         }
         if main.state == .disconnected {
@@ -347,8 +349,9 @@ public final class CentrifugeRpcPool {
             data: call.data,
             options: CentrifugeRpcOptions(headers: headers, timeout: timeout)
         ) { (result: Result<CentrifugeRpcResult, Error>) -> Void in
-            queue.async { [weak self] in
-                self?.innerDone(call, result)
+            // The answer reaches the pool even when it was released, so that the call's completion runs once.
+            queue.async {
+                self.innerDone(call, result)
             }
         }
     }
@@ -380,10 +383,9 @@ public final class CentrifugeRpcPool {
 
     /// Runs the completion of a call, once. The call is taken out of the unsettled set first.
     private func settle(_ call: RpcPoolCall, _ result: Result<CentrifugeRpcResult, Error>) {
-        if call.settled {
+        guard call.settleOnce.claim() else {
             return
         }
-        call.settled = true
         unsettled[ObjectIdentifier(call)] = nil
         publishStats()
         call.completion(result)
@@ -393,9 +395,6 @@ public final class CentrifugeRpcPool {
     /// Cancels a call. A waiting call leaves its line and fails at once. A call in flight fails at once too, and its
     /// connection still answers it, which releases its slot without a second completion.
     private func cancel(_ call: RpcPoolCall) {
-        if call.settled {
-            return
-        }
         let cancelled: CentrifugeError = CentrifugeError.replyError(code: rpcCodeCancelled, message: "cancelled", temporary: false)
         if removeFromLine(call) {
             settle(call, .failure(cancelled))
@@ -511,6 +510,12 @@ public final class CentrifugeRpcPool {
             return
         }
         let now: UInt64 = main.clock.monotonicNanos()
+        // A connection still connecting is not closed under the calls that wait for it: its idle span starts again.
+        if conn.linkState != .connected && callsWait(for: conn.endpoint) {
+            conn.lastUse = now
+            armIdle(conn)
+            return
+        }
         let due: UInt64 = conn.lastUse + clientNanos(options.idleTimeout)
         if now < due {
             armIdle(conn)
@@ -518,6 +523,25 @@ public final class CentrifugeRpcPool {
         }
         closeConnection(conn)
         publishStats()
+    }
+
+
+    /// Whether a waiting call is in the line of a key that resolves to the endpoint.
+    private func callsWait(for endpoint: RpcPoolEndpoint) -> Bool {
+        for key: String in Array(lines.keys) {
+            guard let line: [RpcPoolCall] = lines[key], !line.isEmpty else {
+                continue
+            }
+            guard let endpoints: [RpcPoolEndpoint] = endpointsByKey[key] else {
+                continue
+            }
+            if endpoints.contains(where: { (candidate: RpcPoolEndpoint) -> Bool in
+                return candidate === endpoint
+            }) {
+                return true
+            }
+        }
+        return false
     }
 
 

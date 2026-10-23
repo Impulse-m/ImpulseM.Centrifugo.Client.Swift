@@ -162,7 +162,7 @@ internal final class RpcTracker {
             return
         }
         let limit: TimeInterval = client.config.timeout
-        if let explicit: TimeInterval = options.timeout, !(explicit > 0 && explicit <= limit) {
+        if let explicit: TimeInterval = options.timeout, !isValidRpcTimeout(explicit, limit: limit) {
             completion(.failure(CentrifugeError.configurationError(message: "rpc timeout must be above 0 and no more than the client timeout")))
             return
         }
