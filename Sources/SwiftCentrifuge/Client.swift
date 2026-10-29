@@ -215,8 +215,6 @@ public struct CentrifugeClientConfig {
     /// The RPC pool's connections and redirect fetches use it too, through the same provider.
     /// - Note: Called on an internal queue of the SDK (the client's queue, or the pool's fetch queue for redirects),
     /// never on the main thread. It must be fast and must not block.
-    /// - Note: Called on the client's own private internal serial queue, not the main thread. Must be fast and
-    /// must not block.
     public var proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
 
     /// Id of this client on the server, 22 to 64 characters of A-Z, a-z, 0-9, `_` or `-`. It is
