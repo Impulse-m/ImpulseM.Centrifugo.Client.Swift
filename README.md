@@ -185,7 +185,7 @@ Use the `urlSessionConfigurationProvider` option in `CentrifugeClientConfig` to 
 5.    Test the connection:
 Run your application and ensure that WebSocket traffic from SwiftCentrifuge is properly routed through your proxy tool.
 
-For a proxy that asks for Basic credentials, the native transport uses the session's `connectionProxyDictionary` and answers the proxy's challenge with the credentials from `proxyCredentialsProvider` in `CentrifugeClientConfig`. The provider is asked at each challenge, so it returns the current credentials. If it returns nil, the connection attempt fails. The Starscream transport ignores both the credentials and the provider.
+When the proxy asks for Basic credentials, the native transport answers with the credentials from `proxyCredentialsProvider` in `CentrifugeClientConfig`. Apple's networking asks only on a CONNECT: that is a `wss://` endpoint behind the HTTPS keys of the session's `connectionProxyDictionary`, and any endpoint behind `URLSessionConfiguration.proxyConfigurations` (iOS 17 / macOS 14). For a `ws://` endpoint behind the HTTP keys, the proxy's 407 gets no challenge, so the connection fails; use `wss://` or `proxyConfigurations` there. A `ws://` endpoint with only the HTTPS keys set does not use the proxy at all. The provider is asked at each challenge, and a nil result fails the attempt. The Starscream transport ignores both.
 
 ## Running tests
 

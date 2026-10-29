@@ -206,9 +206,11 @@ public struct CentrifugeClientConfig {
     /// handler on every path.
     public var tlsChallengeHandler: CentrifugeTLSChallengeHandler?
 
-    /// Applied when `useNativeWebSocket == true`. Provides the Basic credentials for an HTTP proxy
-    /// that asks for them (the proxy set in `urlSessionConfigurationProvider`'s `connectionProxyDictionary`).
-    /// The provider is called at each proxy challenge, so it always returns the current credentials.
+    /// Applied when `useNativeWebSocket == true`. Gives the Basic credentials for a proxy that asks for them.
+    /// Apple's networking asks only on a CONNECT: for a `wss://` endpoint behind the HTTPS keys of the
+    /// session's `connectionProxyDictionary`, and for any endpoint behind `URLSessionConfiguration.proxyConfigurations`
+    /// (iOS 17 / macOS 14). For a `ws://` endpoint behind the HTTP keys the proxy's 407 gets no challenge, so the
+    /// connection fails. The provider is called at each challenge, so it returns the current credentials.
     /// Nil, or a provider that returns nil, fails the connection attempt. Starscream ignores this setting.
     /// - Note: Called on the client's own private internal serial queue, not the main thread. Must be fast and
     /// must not block.

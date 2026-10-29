@@ -50,6 +50,28 @@ jobs:
           echo "Centrifugo did not start in time"
           cat centrifugo.log || true
           exit 1
+      # A second Centrifugo with TLS on 8443, for the proxy integration tests over wss://. The
+      # certificate is self-signed, so the tests skip its verification.
+      - name: Start Centrifugo with TLS
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout tls-key.pem -out tls-cert.pem -days 1 -subj "/CN=centrifugo.proxy.test"
+          CENTRIFUGO_CLIENT_INSECURE=true \
+          CENTRIFUGO_LOG_LEVEL=info \
+          CENTRIFUGO_HTTP_SERVER_PORT=8443 \
+          CENTRIFUGO_HTTP_SERVER_TLS_ENABLED=true \
+          CENTRIFUGO_HTTP_SERVER_TLS_CERT_PEM=tls-cert.pem \
+          CENTRIFUGO_HTTP_SERVER_TLS_KEY_PEM=tls-key.pem \
+          ./centrifugo > centrifugo-tls.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sk -o /dev/null https://localhost:8443/connection/websocket; then
+              echo "Centrifugo with TLS is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Centrifugo with TLS did not start in time"
+          cat centrifugo-tls.log || true
+          exit 1
       # The proxy integration tests use a host name that is not a loopback address, since
       # Apple's networking may skip a proxy for localhost. The name resolves to the local Centrifugo.
       - name: Map the proxy test host
@@ -62,4 +84,4 @@ jobs:
         run: ./scripts/test.sh --verbose
       - name: Show Centrifugo log on failure
         if: failure()
-        run: cat centrifugo.log || true
+        run: cat centrifugo.log centrifugo-tls.log || true
