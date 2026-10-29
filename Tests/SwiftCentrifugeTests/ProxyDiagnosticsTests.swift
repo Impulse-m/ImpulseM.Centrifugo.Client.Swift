@@ -89,8 +89,47 @@ struct ProxyDiagnosticsTests {
 
     private enum TaskKind {
         case data
+        case dataSecure
         case webSocketFromURL
+        case webSocketSecureFromURL
         case webSocketFromRequest
+    }
+
+    private final class ClientWatcher: CentrifugeClientDelegate, @unchecked Sendable {
+        private let lock: NSLock = NSLock()
+        private var lines: [String] = []
+        private var connected: Bool = false
+
+        var all: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines
+        }
+
+        var isConnected: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return connected
+        }
+
+        func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
+            lock.lock()
+            connected = true
+            lines.append("connected")
+            lock.unlock()
+        }
+
+        func onDisconnected(_ client: CentrifugeClient, _ event: CentrifugeDisconnectedEvent) {
+            lock.lock()
+            lines.append("disconnected code=\(event.code) reason=\(event.reason)")
+            lock.unlock()
+        }
+
+        func onError(_ client: CentrifugeClient, _ event: CentrifugeErrorEvent) {
+            lock.lock()
+            lines.append("error \(event.error)")
+            lock.unlock()
+        }
     }
 
     private static func proxyHost() -> String? {
@@ -132,9 +171,18 @@ struct ProxyDiagnosticsTests {
             case .data:
                 task = session.dataTask(with: URL(string: "http://\(host):8000/connection/websocket")!)
 
+            case .dataSecure:
+                task = session.dataTask(with: URL(string: "https://\(host):8000/connection/websocket")!)
+
             case .webSocketFromURL:
                 task = session.webSocketTask(
                     with: URL(string: "ws://\(host):8000/connection/websocket")!,
+                    protocols: ["centrifuge-protobuf"]
+                )
+
+            case .webSocketSecureFromURL:
+                task = session.webSocketTask(
+                    with: URL(string: "wss://\(host):8000/connection/websocket")!,
                     protocols: ["centrifuge-protobuf"]
                 )
 
@@ -162,50 +210,108 @@ struct ProxyDiagnosticsTests {
         }
     }
 
+    /// A whole client through the proxy, with the credentials from `proxyCredentialsProvider`.
+    private func runClient(
+        _ name: String,
+        host: String,
+        configure: @escaping (URLSessionConfiguration, UInt16) -> Void
+    ) async throws {
+        let user: String = "user-" + UUID().uuidString.prefix(8)
+        let password: String = "pw-" + UUID().uuidString
+        let proxy: AuthProxy = AuthProxy(user: user, password: password, upstreamPort: 8000)
+        try proxy.start()
+        defer { proxy.stop() }
+
+        let port: UInt16 = proxy.port
+        let logger: CapturingLogger = CapturingLogger()
+        let watcher: ClientWatcher = ClientWatcher()
+        let config: CentrifugeClientConfig = CentrifugeClientConfig(
+            debug: true,
+            useNativeWebSocket: true,
+            urlSessionConfigurationProvider: {
+                let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+                configure(configuration, port)
+                return configuration
+            },
+            logger: logger,
+            proxyCredentialsProvider: {
+                CentrifugeProxyCredentials(user: user, password: password)
+            }
+        )
+        let client: CentrifugeClient = CentrifugeClient(
+            endpoint: "ws://\(host):8000/connection/websocket",
+            config: config,
+            delegate: watcher
+        )
+        client.connect()
+
+        var waited: Int = 0
+        while !watcher.isConnected && waited < 60 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
+        }
+        client.disconnect()
+
+        print("PROXYDIAG [\(name)] connected=\(watcher.isConnected) after \(waited * 100) ms")
+        for line in watcher.all {
+            print("PROXYDIAG [\(name)] client event: \(line)")
+        }
+        for line in logger.all {
+            print("PROXYDIAG [\(name)] client log: \(line)")
+        }
+        print("PROXYDIAG [\(name)] proxy: rejected=\(proxy.rejected) connects=\(proxy.connects) forwards=\(proxy.forwards) forms=\(proxy.forms) authorities=\(proxy.authorities)")
+        for line in proxy.rejections {
+            print("PROXYDIAG [\(name)] proxy 407 for: \(line)")
+        }
+    }
+
+
     @Test func diagnoseProxyAuthentication() async throws {
         guard let host = ProxyDiagnosticsTests.proxyHost() else { return }
 
-        try await run("data, dictionary", host: host, kind: .data) { configuration, port, _, _ in
+        // The tunnel ends at the plain-text server, so TLS fails after the CONNECT. What matters is
+        // whether the CONNECT is challenged and retried with the credentials (connects=1).
+        try await run("https data, dictionary", host: host, kind: .dataSecure) { configuration, port, _, _ in
             configuration.connectionProxyDictionary = ProxyDiagnosticsTests.proxyDictionary(port: port)
         }
 
-        try await run("websocket from URL, dictionary", host: host, kind: .webSocketFromURL) { configuration, port, _, _ in
+        try await run("wss from URL, dictionary", host: host, kind: .webSocketSecureFromURL) { configuration, port, _, _ in
             configuration.connectionProxyDictionary = ProxyDiagnosticsTests.proxyDictionary(port: port)
         }
 
-        try await run("websocket from request, dictionary", host: host, kind: .webSocketFromRequest) { configuration, port, _, _ in
-            configuration.connectionProxyDictionary = ProxyDiagnosticsTests.proxyDictionary(port: port)
-        }
-
-        try await run("websocket from URL, dictionary with user and password", host: host, kind: .webSocketFromURL) { configuration, port, user, password in
+        try await run("wss from URL, dictionary with user and password", host: host, kind: .webSocketSecureFromURL) { configuration, port, user, password in
             var dictionary: [AnyHashable: Any] = ProxyDiagnosticsTests.proxyDictionary(port: port)
             dictionary[kCFProxyUsernameKey as String] = user
             dictionary[kCFProxyPasswordKey as String] = password
             configuration.connectionProxyDictionary = dictionary
         }
 
-        try await run("websocket from request, dictionary with user and password", host: host, kind: .webSocketFromRequest) { configuration, port, user, password in
-            var dictionary: [AnyHashable: Any] = ProxyDiagnosticsTests.proxyDictionary(port: port)
-            dictionary[kCFProxyUsernameKey as String] = user
-            dictionary[kCFProxyPasswordKey as String] = password
-            configuration.connectionProxyDictionary = dictionary
+        try await run("ws from URL, dictionary with HTTPS keys only", host: host, kind: .webSocketFromURL) { configuration, port, _, _ in
+            configuration.connectionProxyDictionary = [
+                "HTTPSEnable": 1,
+                "HTTPSProxy": "127.0.0.1",
+                "HTTPSPort": Int(port),
+            ]
         }
 
-        if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) {
-            try await run("websocket from URL, proxy configuration with credential", host: host, kind: .webSocketFromURL) { configuration, port, user, password in
-                var proxyConfiguration: ProxyConfiguration = ProxyConfiguration(
-                    httpCONNECTProxy: NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
-                )
-                proxyConfiguration.applyCredential(username: user, password: password)
-                configuration.proxyConfigurations = [proxyConfiguration]
+        try await run("ws from request, proxy configuration", host: host, kind: .webSocketFromRequest) { configuration, port, _, _ in
+            if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) {
+                configuration.proxyConfigurations = [
+                    ProxyConfiguration(httpCONNECTProxy: NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+                ]
             }
+        }
 
-            try await run("websocket from URL, proxy configuration without credential", host: host, kind: .webSocketFromURL) { configuration, port, _, _ in
-                let proxyConfiguration: ProxyConfiguration = ProxyConfiguration(
-                    httpCONNECTProxy: NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
-                )
-                configuration.proxyConfigurations = [proxyConfiguration]
+        try await runClient("client, proxy configuration", host: host) { configuration, port in
+            if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) {
+                configuration.proxyConfigurations = [
+                    ProxyConfiguration(httpCONNECTProxy: NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+                ]
             }
+        }
+
+        try await runClient("client, dictionary", host: host) { configuration, port in
+            configuration.connectionProxyDictionary = ProxyDiagnosticsTests.proxyDictionary(port: port)
         }
     }
 }
