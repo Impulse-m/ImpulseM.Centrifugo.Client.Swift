@@ -128,7 +128,7 @@ struct NativeWebSocketProxyAuthTests {
         #expect(disposition == .useCredential)
         #expect(credential?.user == "alice")
         #expect(credential?.password == "s3cret")
-        #expect(credential?.persistence == .none)
+        #expect(credential?.persistence == URLCredential.Persistence.none)
     }
 
     @Test func providerIsCalledAtChallengeTime() {
