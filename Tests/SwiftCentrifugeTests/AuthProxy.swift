@@ -46,6 +46,7 @@ final class AuthProxy: @unchecked Sendable {
     private var forwardCount: Int = 0
     private var recordedAuthorities: [String] = []
     private var recordedForms: [String] = []
+    private var recordedRejections: [String] = []
 
     init(user: String, password: String, upstreamPort: UInt16) {
         self.user = user
@@ -80,6 +81,11 @@ final class AuthProxy: @unchecked Sendable {
     /// The form of every authenticated request, `CONNECT` or `absolute`, in order.
     var forms: [String] {
         return locked { recordedForms }
+    }
+
+    /// The request line and the header names of every request answered with 407, in order.
+    var rejections: [String] {
+        return locked { recordedRejections }
     }
 
     func start() throws {
@@ -169,7 +175,11 @@ final class AuthProxy: @unchecked Sendable {
         let headers: [String: String] = parseHeaders(lines)
         let expected: String = "Basic " + Data("\(user):\(password)".utf8).base64EncodedString()
         if headers["proxy-authorization"] != expected {
-            locked { rejectedCount += 1 }
+            let names: String = headers.keys.sorted().joined(separator: ",")
+            locked {
+                rejectedCount += 1
+                recordedRejections.append("\(lines[0]) [\(names)]")
+            }
             send(exchange.client, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 0\r\n\r\n")
             return true
         }
