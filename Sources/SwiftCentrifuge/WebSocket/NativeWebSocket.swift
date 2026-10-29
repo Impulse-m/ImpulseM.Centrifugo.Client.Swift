@@ -143,8 +143,9 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
         let configuration = urlSessionConfigurationProvider()
 
-        // For some reason, `URLSessionWebSocketTask` will only respect the proxy
-        // configuration if started with a URL and not a URLRequest. So the task is started
+        // A `URLSessionWebSocketTask` started with a URLRequest may not respect the proxy
+        // configuration (seen by Signal-iOS; on macOS 15 it reaches the proxy, but hangs
+        // when the proxy answers 407), while one started with a URL does. So the task is started
         // from the URL (see connect()), and the request's headers are moved to the session
         // here, since a task started from a URL does not take them from a request.
         // The subprotocol is passed to the task directly for the same reason.

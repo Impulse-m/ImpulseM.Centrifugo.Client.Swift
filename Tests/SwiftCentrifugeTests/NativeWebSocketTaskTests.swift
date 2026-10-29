@@ -4,8 +4,8 @@ import Testing
 
 /// Unit tests for how `NativeWebSocket` starts its `URLSessionWebSocketTask`.
 ///
-/// The task is started from the request's URL, not from the request, because only a URL-started
-/// task honours the session's proxy settings. The subprotocol is passed to the task, and the
+/// The task is started from the request's URL, not from the request, because a request-started
+/// task may not honour the session's proxy settings. The subprotocol is passed to the task, and the
 /// request's headers are moved to the session. These tests look at what the task is created from,
 /// through the `makeTask` seam, and the task itself points at a port nothing listens on.
 @Suite(.timeLimit(.minutes(1)))
