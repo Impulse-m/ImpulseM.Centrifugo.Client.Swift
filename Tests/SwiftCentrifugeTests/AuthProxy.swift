@@ -28,6 +28,12 @@ final class AuthProxy: @unchecked Sendable {
 
     private static let headEnd: Data = Data("\r\n\r\n".utf8)
 
+    /// What the proxy does once the upstream connection is up.
+    private enum Takeover {
+        case tunnel
+        case forward(head: Data)
+    }
+
     private let user: String
     private let password: String
     private let upstreamPort: UInt16
@@ -174,11 +180,7 @@ final class AuthProxy: @unchecked Sendable {
                 recordedAuthorities.append(target)
                 recordedForms.append("CONNECT")
             }
-            openUpstream(exchange) { upstream in
-                self.send(exchange.client, "HTTP/1.1 200 Connection Established\r\n\r\n")
-                self.forwardLeftover(exchange, to: upstream)
-                self.pipeBothWays(exchange.client, upstream)
-            }
+            openUpstream(exchange, takeover: .tunnel)
             return false
         }
 
@@ -199,11 +201,7 @@ final class AuthProxy: @unchecked Sendable {
                 rewritten.append(line)
             }
             let rewrittenHead: Data = Data((rewritten.joined(separator: "\r\n") + "\r\n\r\n").utf8)
-            openUpstream(exchange) { upstream in
-                upstream.send(content: rewrittenHead, completion: .contentProcessed { _ in })
-                self.forwardLeftover(exchange, to: upstream)
-                self.pipeBothWays(exchange.client, upstream)
-            }
+            openUpstream(exchange, takeover: .forward(head: rewrittenHead))
             return false
         }
 
@@ -225,8 +223,10 @@ final class AuthProxy: @unchecked Sendable {
         return headers
     }
 
-    /// Connects to the local server. `ready` runs on the proxy's queue once the connection is up.
-    private func openUpstream(_ exchange: Exchange, ready: @escaping (NWConnection) -> Void) {
+    /// Connects to the local server, then takes the exchange over: a tunnel answers the client with
+    /// 200, a forward sends the rewritten head upstream. Either way the bytes already read from the
+    /// client go upstream first, and then both directions are piped.
+    private func openUpstream(_ exchange: Exchange, takeover: Takeover) {
         let upstream: NWConnection = NWConnection(
             host: "127.0.0.1", port: NWEndpoint.Port(rawValue: upstreamPort)!, using: .tcp)
         exchange.upstream = upstream
@@ -237,7 +237,7 @@ final class AuthProxy: @unchecked Sendable {
                         return
                     }
                     exchange.upstreamReady = true
-                    ready(upstream)
+                    self.finishTakeover(exchange, upstream: upstream, takeover: takeover)
 
                 case .failed, .cancelled:
                     exchange.client.cancel()
@@ -249,12 +249,19 @@ final class AuthProxy: @unchecked Sendable {
         upstream.start(queue: queue)
     }
 
-    private func forwardLeftover(_ exchange: Exchange, to upstream: NWConnection) {
-        guard !exchange.buffer.isEmpty else {
-            return
+    private func finishTakeover(_ exchange: Exchange, upstream: NWConnection, takeover: Takeover) {
+        switch takeover {
+            case .tunnel:
+                send(exchange.client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+            case .forward(let head):
+                upstream.send(content: head, completion: .contentProcessed { _ in })
         }
-        upstream.send(content: exchange.buffer, completion: .contentProcessed { _ in })
-        exchange.buffer = Data()
+        if !exchange.buffer.isEmpty {
+            upstream.send(content: exchange.buffer, completion: .contentProcessed { _ in })
+            exchange.buffer = Data()
+        }
+        pipeBothWays(exchange.client, upstream)
     }
 
     private func pipeBothWays(_ client: NWConnection, _ upstream: NWConnection) {
