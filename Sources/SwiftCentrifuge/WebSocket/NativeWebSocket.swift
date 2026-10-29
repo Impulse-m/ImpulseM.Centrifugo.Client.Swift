@@ -229,36 +229,13 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         assertIsOnQueue(queue)
 
-        guard challenge.protectionSpace.isProxy(),
-              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodHTTPBasic else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        // The proxy rejected the credentials we sent. Fail instead of asking again.
-        guard challenge.previousFailureCount == 0 else {
-            log.debug("Proxy rejected the credentials, failing the connection attempt")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        guard let proxyCredentialsProvider = proxyCredentialsProvider,
-              let proxyCredentials = proxyCredentialsProvider() else {
-            log.debug("Proxy asks for credentials and none are provided, failing the connection attempt")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        log.debug("Answering the proxy's Basic challenge")
-        // Persistence .none, not .forSession: a stored credential would be proposed again after
-        // the proxy's password changes, fail with previousFailureCount 1 and be cancelled on every
-        // later attempt. It also keeps the password out of the shared credential storage.
-        let credential: URLCredential = URLCredential(
-            user: proxyCredentials.user,
-            password: proxyCredentials.password,
-            persistence: .none
+        let answer: (disposition: URLSession.AuthChallengeDisposition, credential: URLCredential?) = proxyChallengeAnswer(
+            challenge, provider: proxyCredentialsProvider
         )
-        completionHandler(.useCredential, credential)
+        if challenge.protectionSpace.isProxy() {
+            log.debug("Answering the proxy's challenge, disposition: \(answer.disposition.rawValue)")
+        }
+        completionHandler(answer.disposition, answer.credential)
     }
 
     private func handleTaskClose(task: URLSessionWebSocketTask,

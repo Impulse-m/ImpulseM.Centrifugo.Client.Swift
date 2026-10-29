@@ -212,6 +212,9 @@ public struct CentrifugeClientConfig {
     /// (iOS 17 / macOS 14). For a `ws://` endpoint behind the HTTP keys the proxy's 407 gets no challenge, so the
     /// connection fails. The provider is called at each challenge, so it returns the current credentials.
     /// Nil, or a provider that returns nil, fails the connection attempt. Starscream ignores this setting.
+    /// The RPC pool's connections and redirect fetches use it too, through the same provider.
+    /// - Note: Called on an internal queue of the SDK (the client's queue, or the pool's fetch queue for redirects),
+    /// never on the main thread. It must be fast and must not block.
     /// - Note: Called on the client's own private internal serial queue, not the main thread. Must be fast and
     /// must not block.
     public var proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
