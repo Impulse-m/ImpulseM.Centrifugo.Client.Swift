@@ -50,9 +50,15 @@ jobs:
           echo "Centrifugo did not start in time"
           cat centrifugo.log || true
           exit 1
+      # The proxy integration tests use a host name that is not a loopback address, since
+      # Apple's networking may skip a proxy for localhost. The name resolves to the local Centrifugo.
+      - name: Map the proxy test host
+        run: echo "127.0.0.1 centrifugo.proxy.test" | sudo tee -a /etc/hosts
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
         # because the runner has Xcode. See CLAUDE.md.
+        env:
+          CENTRIFUGE_PROXY_TEST_HOST: centrifugo.proxy.test
         run: ./scripts/test.sh --verbose
       - name: Show Centrifugo log on failure
         if: failure()

@@ -74,6 +74,7 @@ public struct CentrifugeClientConfig {
     ///   - tokenGetter: Callback for retrieving authentication tokens dynamically
     ///   - logger: Logger instance for debugging and diagnostics
     ///   - tlsChallengeHandler: Optional handler receiving every challenge the native WebSocket transport's `URLSession` gets at the session level (server-trust, client-certificate/mTLS, and also NTLM/Negotiate for an authenticating proxy), e.g. to trust a private CA, pin a certificate, or present a client identity. Takes precedence over `tlsSkipVerify` when both are set
+    ///   - proxyCredentialsProvider: Optional provider of the Basic credentials for an HTTP proxy that asks for them. Applies only to the native transport. Called at each proxy challenge, so it returns the current credentials. Nil fails the connection attempt
     ///   - instance: Optional id of this client, 22 to 64 characters of A-Z, a-z, 0-9, `_` or `-`. Sent in the connect request and never logged. See `CentrifugeClient.create`
     public init(
         timeout: Double = 5.0,
@@ -92,6 +93,7 @@ public struct CentrifugeClientConfig {
         tokenGetter: CentrifugeConnectionTokenGetter? = nil,
         logger: CentrifugeLogger? = nil,
         tlsChallengeHandler: CentrifugeTLSChallengeHandler? = nil,
+        proxyCredentialsProvider: CentrifugeProxyCredentialsProvider? = nil,
         instance: String? = nil,
         maxPendingRpc: Int = 32,
         stopOnRefusedToken: Bool = true,
@@ -115,6 +117,7 @@ public struct CentrifugeClientConfig {
         self.tokenGetter = tokenGetter
         self.logger = logger
         self.tlsChallengeHandler = tlsChallengeHandler
+        self.proxyCredentialsProvider = proxyCredentialsProvider
         self.instance = instance
         self.maxPendingRpc = maxPendingRpc
         self.stopOnRefusedToken = stopOnRefusedToken
@@ -202,6 +205,14 @@ public struct CentrifugeClientConfig {
     /// stall (a network call to check a pin set, etc.) should still call the completion
     /// handler on every path.
     public var tlsChallengeHandler: CentrifugeTLSChallengeHandler?
+
+    /// Applied when `useNativeWebSocket == true`. Provides the Basic credentials for an HTTP proxy
+    /// that asks for them (the proxy set in `urlSessionConfigurationProvider`'s `connectionProxyDictionary`).
+    /// The provider is called at each proxy challenge, so it always returns the current credentials.
+    /// Nil, or a provider that returns nil, fails the connection attempt. Starscream ignores this setting.
+    /// - Note: Called on the client's own private internal serial queue, not the main thread. Must be fast and
+    /// must not block.
+    public var proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
 
     /// Id of this client on the server, 22 to 64 characters of A-Z, a-z, 0-9, `_` or `-`. It is
     /// sent in the connect request when set, and it is never written to the debug log. An invalid
@@ -892,6 +903,7 @@ fileprivate extension CentrifugeClient {
                 urlSessionConfigurationProvider: config.urlSessionConfigurationProvider,
                 tlsSkipVerify: config.tlsSkipVerify,
                 tlsChallengeHandler: config.tlsChallengeHandler,
+                proxyCredentialsProvider: config.proxyCredentialsProvider,
                 queue: syncQueue,
                 log: log
             )

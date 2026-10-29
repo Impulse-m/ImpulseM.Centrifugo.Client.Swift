@@ -52,6 +52,7 @@ struct NativeWebSocketTLSChallengeTests {
             urlSessionConfigurationProvider: nil,
             tlsSkipVerify: tlsSkipVerify,
             tlsChallengeHandler: tlsChallengeHandler,
+            proxyCredentialsProvider: nil,
             queue: queue,
             log: EmptyLogger.instance
         )
