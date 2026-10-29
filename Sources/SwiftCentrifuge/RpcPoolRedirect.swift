@@ -88,20 +88,51 @@ internal func urlWithoutFragment(_ url: URL) -> String {
 }
 
 
-/// The configuration of a pool's redirect session. It is a fresh ephemeral configuration: the application's session
+/// Where the redirect fetches of a pool take their transport settings: the configuration, and whether each fetch asks
+/// for it again (`perFetch`), so that a session made from a provider is current for every fetch.
+internal struct RpcPoolRedirectSource {
+    internal let configuration: () -> URLSessionConfiguration
+
+    internal let perFetch: Bool
+}
+
+
+/// The source of the redirect fetches. The pool's `urlSession` wins when it is set, and it is read once. Otherwise the
+/// main client's `urlSessionConfigurationProvider` is asked for each fetch. Otherwise the fetches use an ephemeral session.
+internal func redirectSource(
+    urlSession: URLSession?,
+    mainProvider: URLSessionConfigurationProvider?
+) -> RpcPoolRedirectSource {
+    if let given: URLSession = urlSession {
+        let fixed: URLSessionConfiguration = redirectSessionConfiguration(given.configuration)
+        return RpcPoolRedirectSource(configuration: { () -> URLSessionConfiguration in
+            return fixed
+        }, perFetch: false)
+    }
+    if let provider: URLSessionConfigurationProvider = mainProvider {
+        return RpcPoolRedirectSource(configuration: { () -> URLSessionConfiguration in
+            return redirectSessionConfiguration(provider())
+        }, perFetch: true)
+    }
+    return RpcPoolRedirectSource(configuration: { () -> URLSessionConfiguration in
+        return redirectSessionConfiguration(nil)
+    }, perFetch: false)
+}
+
+
+/// The configuration of a pool's redirect session. It is a fresh ephemeral configuration: the given configuration
 /// contributes only its transport settings (proxy, TLS, timeouts, URL protocol classes, waiting for connectivity).
 /// Its headers, cookies, stored credentials and cache are never copied, so an application header such as
 /// `Authorization` never reaches the host that a redirect names.
-internal func redirectSessionConfiguration(_ session: URLSession?) -> URLSessionConfiguration {
+internal func redirectSessionConfiguration(_ source: URLSessionConfiguration?) -> URLSessionConfiguration {
     let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.urlCredentialStorage = nil
     configuration.urlCache = nil
-    guard let given: URLSession = session else {
+    guard let source: URLSessionConfiguration = source else {
         return configuration
     }
-    let source: URLSessionConfiguration = given.configuration
     configuration.connectionProxyDictionary = source.connectionProxyDictionary
     if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
         configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
@@ -212,12 +243,34 @@ internal final class RpcPoolFetchDelegate: NSObject, URLSessionDataDelegate {
 
     private var bodies: [Int: RpcPoolFetchBody] = [:]
 
+    /// The main client's provider of the proxy's credentials, asked at each proxy challenge on the session's queue.
+    private let proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
+
+
+    internal init(proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?) {
+        self.proxyCredentialsProvider = proxyCredentialsProvider
+        super.init()
+    }
+
 
     /// Registers the body of a task. Called before the task starts.
     internal func register(_ identifier: Int, _ body: RpcPoolFetchBody) {
         lock.lock()
         bodies[identifier] = body
         lock.unlock()
+    }
+
+
+    internal func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let answer: (disposition: URLSession.AuthChallengeDisposition, credential: URLCredential?) = proxyChallengeAnswer(
+            challenge, provider: proxyCredentialsProvider
+        )
+        completionHandler(answer.disposition, answer.credential)
     }
 
 
@@ -345,9 +398,13 @@ internal final class RpcPoolFetches {
 
     private let limit: Int
 
-    private let configuration: URLSessionConfiguration
+    /// The transport settings of a session, asked when the session is made: once for the cached session, or for each
+    /// fetch with `perFetch`.
+    private let configuration: () -> URLSessionConfiguration
 
-    private let delegate: RpcPoolFetchDelegate = RpcPoolFetchDelegate()
+    private let perFetch: Bool
+
+    private let delegate: RpcPoolFetchDelegate
 
     private var session: URLSession? = nil
 
@@ -367,11 +424,14 @@ internal final class RpcPoolFetches {
     internal init(
         queue: DispatchQueue,
         limit: Int,
-        configuration: URLSessionConfiguration
+        source: RpcPoolRedirectSource,
+        proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
     ) {
         self.queue = queue
         self.limit = limit
-        self.configuration = configuration
+        self.configuration = source.configuration
+        self.perFetch = source.perFetch
+        self.delegate = RpcPoolFetchDelegate(proxyCredentialsProvider: proxyCredentialsProvider)
     }
 
 
@@ -508,12 +568,16 @@ internal final class RpcPoolFetches {
                 self?.completed(fetch, outcome)
             }
         }
-        let target: URLSession = currentSession()
+        // A per-fetch session is made for this fetch alone, from the configuration asked now, and ends once its task does.
+        let target: URLSession = perFetch ? makeSession() : currentSession()
         let task: URLSessionDataTask = target.dataTask(with: fetch.makeRequest())
         fetch.task = task
         running[ObjectIdentifier(fetch.call)] = fetch
         delegate.register(task.taskIdentifier, body)
         task.resume()
+        if perFetch {
+            target.finishTasksAndInvalidate()
+        }
     }
 
 
@@ -540,10 +604,16 @@ internal final class RpcPoolFetches {
         if let existing: URLSession = session {
             return existing
         }
-        let operations: OperationQueue = OperationQueue()
-        operations.maxConcurrentOperationCount = 1
-        let created: URLSession = URLSession(configuration: configuration, delegate: delegate, delegateQueue: operations)
+        let created: URLSession = makeSession()
         session = created
         return created
+    }
+
+
+    /// A session for the fetches, with its callbacks on one serial queue of its own.
+    private func makeSession() -> URLSession {
+        let operations: OperationQueue = OperationQueue()
+        operations.maxConcurrentOperationCount = 1
+        return URLSession(configuration: configuration(), delegate: delegate, delegateQueue: operations)
     }
 }

@@ -6,7 +6,7 @@ Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) ser
 
 This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), the upstream Swift client SDK. The fork is built for the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) and is released from its own repository. The upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
 
-- **Current version:** 2.0.2. Install it with Swift Package Manager from `https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git` (see [Installation](#installation)). The breaking changes of 2.0.0 are listed in [MIGRATION.md](MIGRATION.md).
+- **Current version:** 2.1.0. Install it with Swift Package Manager from `https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git` (see [Installation](#installation)). The breaking changes of 2.0.0 are listed in [MIGRATION.md](MIGRATION.md).
 - **What the fork adds:**
   - [Instance, server time and identity](#instance-server-time-and-identity)
   - [Tracked rpc calls](#tracked-rpc-calls) and their [client error codes](#client-error-codes)
@@ -109,6 +109,10 @@ Codes 15 to 18 are client-local errors of the fork SDKs; a server never sends th
 
 `CentrifugeRpcPool(main:options:)` (or `CentrifugeRpcPool.create`, which throws for options that cannot work) runs plain calls for large payloads on several connections per endpoint URL. `endpoints` maps an endpoint key to URLs; each connection carries up to `maxInflightPerConnection` calls (default 1), and at most `maxConnectionsPerEndpoint` connections open per URL (default 2). A call that finds no free slot waits in the line of its key, up to `maxQueued` (default 64); a call beyond that fails with `replyError(code: 16)` unless it can open a connection. A connection without calls for `idleTimeout` (default 60 seconds) closes. `close(completion:)` closes every connection: waiting calls fail with `replyError(code: 17)`, calls in flight with `connectionClosed`, and later calls with `clientRejected(code: 4)`. The pool's calls use the main client's queue and clock, so a delegate callback may call `stats()` and `close(completion:)`.
 
+### Transport
+
+The pool's connections take the main client's transport: `useNativeWebSocket`, `urlSessionConfigurationProvider`, `proxyCredentialsProvider`, `tlsSkipVerify` and `tlsChallengeHandler`. They go through the same proxy with the same credentials as the main client. The providers are asked by each connection itself, so a change they return reaches the connections made after it. A native main client on a system without `URLSessionWebSocketTask` makes the pool refuse with `configurationError` (`create` throws it) instead of connecting with Starscream.
+
 ### Failures and resends
 
 - A call made while the main client is disconnected fails with `clientDisconnected`, or with `unauthorized` when the session ended. A call whose options cannot work (for example an `affinity` without `affinityHeader`, or a `timeout` above the pool's) fails with `configurationError`.
@@ -128,7 +132,7 @@ The `redirect` option moves the bytes of a call to a URL. It receives the outcom
 - The URL must be `https:`; `http:` is allowed only from an endpoint that is not secure, since `wss:` and `https:` endpoints are secure. A URL of another scheme fails the call before any request.
 - A body over `maxBytes` (default `maxRedirectBytes`, 16 MiB) is refused before it is read in full, and a non-2xx status or a failed fetch fails the call. All of these settle the call with `replyError(code: 18)`.
 - At most `maxRedirectsInflight` fetches run at once (default 4, from 1 to 16). A fetch that waits for a slot counts in `queued`, under `maxQueued`, and `close` settles it with `connectionClosed`. The deadline of the call covers the fetch.
-- The fetch uses the transport settings of `urlSession` when one is given (proxy, TLS, timeouts, URL protocol classes), and none of its headers, cookies, credentials or cache. A runtime that follows a redirect anyway and reports no response URL cannot be detected by the pool, so it is outside this check; an application that needs a strict check on such a runtime uses its own session.
+- The fetch uses the transport settings of `urlSession` when one is given, or else of the main client's `urlSessionConfigurationProvider`, which is asked for each fetch; with neither, it is an ephemeral session. It takes the proxy, TLS, timeouts and URL protocol classes from them, and none of their headers, cookies, credentials or cache. A proxy's challenge is answered with the main client's `proxyCredentialsProvider`. A runtime that follows a redirect anyway and reports no response URL cannot be detected by the pool, so it is outside this check; an application that needs a strict check on such a runtime uses its own session.
 
 ### Tokens and identity
 

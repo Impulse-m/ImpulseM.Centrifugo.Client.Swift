@@ -26,8 +26,8 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// The configuration error of the options, or nil. A pool with one fails every call with it.
     private let configError: CentrifugeError?
 
-    /// The settings of each connection, from the pool's options.
-    private let connectionConfig: CentrifugeClientConfig
+    /// The settings of each connection: the pool's options, and the transport of the main client (see `init`).
+    internal let connectionConfig: CentrifugeClientConfig
 
     /// The redirect fetches of the pool: their slots, their line and their session.
     private let fetches: RpcPoolFetches
@@ -90,12 +90,18 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         self.main = main
         self.queue = main.syncQueue
         self.options = options
+        let mainConfig: CentrifugeClientConfig = main.config
         self.fetches = RpcPoolFetches(
             queue: main.syncQueue,
             limit: options.maxRedirectsInflight,
-            configuration: redirectSessionConfiguration(options.urlSession)
+            source: redirectSource(
+                urlSession: options.urlSession,
+                mainProvider: mainConfig.urlSessionConfigurationProvider
+            ),
+            proxyCredentialsProvider: mainConfig.proxyCredentialsProvider
         )
         self.configError = poolConfigurationError(options)
+            ?? poolTransportError(useNativeWebSocket: mainConfig.useNativeWebSocket, nativeAvailable: nativeWebSocketIsAvailable)
         var settings: CentrifugeClientConfig = CentrifugeClientConfig(
             timeout: options.timeout,
             headers: options.headers,
@@ -107,6 +113,13 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
         )
         settings.token = options.token
         settings.tokenGetter = options.tokenGetter
+        // The transport of the main client, so that the pool's connections use its proxy, TLS and credentials. The
+        // providers are closures: each connection asks them itself, when it makes its session and at each challenge.
+        settings.useNativeWebSocket = mainConfig.useNativeWebSocket
+        settings.urlSessionConfigurationProvider = mainConfig.urlSessionConfigurationProvider
+        settings.proxyCredentialsProvider = mainConfig.proxyCredentialsProvider
+        settings.tlsSkipVerify = mainConfig.tlsSkipVerify
+        settings.tlsChallengeHandler = mainConfig.tlsChallengeHandler
         self.connectionConfig = settings
         if options.tokenFrom {
             // The source is made, stored on the main client and told of this pool on the main client's queue: the client
@@ -127,6 +140,12 @@ public final class CentrifugeRpcPool: RpcPoolMainListener {
     /// - Throws: `CentrifugeError.configurationError` for an option that cannot work.
     public static func create(main: CentrifugeClient, options: CentrifugeRpcPoolOptions) throws -> CentrifugeRpcPool {
         if let error: CentrifugeError = poolConfigurationError(options) {
+            throw error
+        }
+        if let error: CentrifugeError = poolTransportError(
+            useNativeWebSocket: main.config.useNativeWebSocket,
+            nativeAvailable: nativeWebSocketIsAvailable
+        ) {
             throw error
         }
         return CentrifugeRpcPool(main: main, options: options)

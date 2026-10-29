@@ -78,8 +78,9 @@ public struct CentrifugeRpcPoolOptions {
     public var maxRedirectBytes: Int
 
     /// The session whose transport settings (proxy, TLS, timeouts) the redirect fetches keep. The pool uses its own
-    /// delegate, and never the headers, cookies, stored credentials or cache of the session. Nil means an ephemeral
-    /// session.
+    /// delegate, and never the headers, cookies, stored credentials or cache of the session. Nil means the main client's
+    /// `urlSessionConfigurationProvider` when it has one, asked for each fetch, and an ephemeral session otherwise. The
+    /// proxy's credentials of the fetches are the main client's `proxyCredentialsProvider`, whatever this is.
     public var urlSession: URLSession?
 
     /// Whether the connections take their token from the main client: the client's confirmed token is lent to each
@@ -201,6 +202,27 @@ public struct CentrifugeRpcPoolStats: Equatable {
         self.queued = queued
         self.redirects = redirects
     }
+}
+
+
+/// Whether this system has `URLSessionWebSocketTask`, which the native transport needs.
+internal var nativeWebSocketIsAvailable: Bool {
+    if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+        return true
+    }
+    return false
+}
+
+
+/// The configuration error of a pool whose connections would use a transport this system lacks, or nil. A pool of a
+/// native main client refuses on such a system instead of connecting with Starscream, which the main client does not use.
+internal func poolTransportError(useNativeWebSocket: Bool, nativeAvailable: Bool) -> CentrifugeError? {
+    if useNativeWebSocket && !nativeAvailable {
+        return CentrifugeError.configurationError(
+            message: "useNativeWebSocket needs URLSessionWebSocketTask, which this system does not have"
+        )
+    }
+    return nil
 }
 
 
