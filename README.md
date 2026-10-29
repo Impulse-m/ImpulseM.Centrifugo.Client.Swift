@@ -6,7 +6,7 @@ Websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) ser
 
 This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-swift), the upstream Swift client SDK. The fork is built for the [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) and is released from its own repository. The upstream [client SDK documentation](https://centrifugal.dev/docs/transports/client_api) applies here as well.
 
-- **Current version:** 2.0.0. Install it with Swift Package Manager from `https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git` (see [Installation](#installation)). The breaking changes of 2.0.0 are listed in [MIGRATION.md](MIGRATION.md).
+- **Current version:** 2.0.2. Install it with Swift Package Manager from `https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift.git` (see [Installation](#installation)). The breaking changes of 2.0.0 are listed in [MIGRATION.md](MIGRATION.md).
 - **What the fork adds:**
   - [Instance, server time and identity](#instance-server-time-and-identity)
   - [Tracked rpc calls](#tracked-rpc-calls) and their [client error codes](#client-error-codes)
@@ -14,6 +14,7 @@ This is a fork of [centrifuge-swift](https://github.com/centrifugal/centrifuge-s
   - [Connection token refresh](#connection-token-refresh), including the token exchange
   - [Ping watchdog](#ping-watchdog)
   - [Publish debounce](#publish-debounce)
+  - `proxyCredentialsProvider`: Basic credentials for an HTTP proxy on the native transport (see [URLSessionWebSocketTask: configuring Proxy Settings](#urlsessionwebsockettask-configuring-proxy-settings))
 - **Sibling repositories:**
   - Server: [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo)
   - Core (Go library used by the server): [ImpulseM.Centrifugo.Core](https://github.com/Impulse-m/ImpulseM.Centrifugo.Core)
@@ -183,6 +184,8 @@ After verifying that the proxy tool works as expected, disable the system-wide p
 Use the `urlSessionConfigurationProvider` option in `CentrifugeClientConfig` to explicitly provide proxy settings for `URLSessionWebSocketTask`.
 5.    Test the connection:
 Run your application and ensure that WebSocket traffic from SwiftCentrifuge is properly routed through your proxy tool.
+
+When the proxy asks for Basic credentials, the native transport answers with the credentials from `proxyCredentialsProvider` in `CentrifugeClientConfig`. Apple's networking asks only on a CONNECT: that is a `wss://` endpoint behind the HTTPS keys of the session's `connectionProxyDictionary`, and any endpoint behind `URLSessionConfiguration.proxyConfigurations` (iOS 17 / macOS 14). For a `ws://` endpoint behind the HTTP keys, the proxy's 407 gets no challenge, so the connection fails; use `wss://` or `proxyConfigurations` there. A `ws://` endpoint with only the HTTPS keys set does not use the proxy at all. The provider is asked at each challenge, and a nil result fails the attempt. The Starscream transport ignores both.
 
 ## Running tests
 

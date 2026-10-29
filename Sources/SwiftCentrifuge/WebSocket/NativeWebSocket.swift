@@ -16,26 +16,32 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
     var onData: ((Data) -> Void)?
 
+    /// Creates the task of a connection. A seam for tests, which check what the task is started from.
+    var makeTask: (URLSession, URL, [String]) -> URLSessionWebSocketTask = { session, url, protocols in
+        session.webSocketTask(with: url, protocols: protocols)
+    }
+
     private var session: URLSession?
     private let log: CentrifugeLogger
     private let request: URLRequest
     private let urlSessionConfigurationProvider: (() -> URLSessionConfiguration)
     private let tlsSkipVerify: Bool
     private let tlsChallengeHandler: CentrifugeTLSChallengeHandler?
+    private let proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
     private let queue: DispatchQueue
 
     /// The websocket is considered 'active' when `task` is not nil
     private var task: URLSessionWebSocketTask?
 
     init(request: URLRequest, urlSessionConfigurationProvider: URLSessionConfigurationProvider?,
-         tlsSkipVerify: Bool, tlsChallengeHandler: CentrifugeTLSChallengeHandler?, queue: DispatchQueue, log: CentrifugeLogger) {
-        var request = request
-        request.setValue("centrifuge-protobuf", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+         tlsSkipVerify: Bool, tlsChallengeHandler: CentrifugeTLSChallengeHandler?,
+         proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?, queue: DispatchQueue, log: CentrifugeLogger) {
         self.request = request
         self.log = log
         self.urlSessionConfigurationProvider = urlSessionConfigurationProvider ?? { URLSessionConfiguration.default }
         self.tlsSkipVerify = tlsSkipVerify
         self.tlsChallengeHandler = tlsChallengeHandler
+        self.proxyCredentialsProvider = proxyCredentialsProvider
         self.queue = queue
     }
 
@@ -52,7 +58,12 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
         log.debug("Connecting...")
 
-        let task = getOrCreateSession().webSocketTask(with: request)
+        guard let url: URL = request.url else {
+            log.warning("Cannot connect: the endpoint has no URL")
+            return
+        }
+
+        let task = makeTask(getOrCreateSession(), url, ["centrifuge-protobuf"])
         // URLSessionWebSocketTask fails any message larger than 1 MiB by default (and the
         // connection with it). The server decides how large a message can be.
         task.maximumMessageSize = Int(Int32.max)
@@ -132,9 +143,12 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
         let configuration = urlSessionConfigurationProvider()
 
-        // For some reason, `URLSessionWebSocketTask` will only respect the proxy
-        // configuration if started with a URL and not a URLRequest. As a temporary
-        // workaround, port header information from the request to the session.
+        // A `URLSessionWebSocketTask` started with a URLRequest may not respect the proxy
+        // configuration (seen by Signal-iOS; on macOS 15 it reaches the proxy, but hangs
+        // when the proxy answers 407), while one started with a URL does. So the task is started
+        // from the URL (see connect()), and the request's headers are moved to the session
+        // here, since a task started from a URL does not take them from a request.
+        // The subprotocol is passed to the task directly for the same reason.
         //
         // We copied this workaround from Signal-iOS web socket implementation
         var httpAdditionalHeaders = configuration.httpAdditionalHeaders ?? .init()
@@ -188,8 +202,8 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
         // equivalent AuthenticationChallengeResponsible.downloader(_:didReceive:) forward).
         // A handler only interested in TLS trust decisions should check
         // challenge.protectionSpace.authenticationMethod itself, as CentrifugeTLSChallengeHandler's
-        // documentation instructs. (HTTP Basic/Digest never reach this method at all;
-        // those are task-level only and this class doesn't implement that delegate method.)
+        // documentation instructs. (HTTP Basic/Digest challenges are task-level and never reach
+        // this method; they are answered by urlSession(_:task:didReceive:completionHandler:).)
         if let tlsChallengeHandler = tlsChallengeHandler {
             log.debug("Forwarding challenge to tlsChallengeHandler")
             tlsChallengeHandler(challenge, completionHandler)
@@ -209,6 +223,42 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
         log.debug("Using default TLS handling")
         completionHandler(.performDefaultHandling, nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        assertIsOnQueue(queue)
+
+        guard challenge.protectionSpace.isProxy(),
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodHTTPBasic else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        // The proxy rejected the credentials we sent. Fail instead of asking again.
+        guard challenge.previousFailureCount == 0 else {
+            log.debug("Proxy rejected the credentials, failing the connection attempt")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        guard let proxyCredentialsProvider = proxyCredentialsProvider,
+              let proxyCredentials = proxyCredentialsProvider() else {
+            log.debug("Proxy asks for credentials and none are provided, failing the connection attempt")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        log.debug("Answering the proxy's Basic challenge")
+        // Persistence .none, not .forSession: a stored credential would be proposed again after
+        // the proxy's password changes, fail with previousFailureCount 1 and be cancelled on every
+        // later attempt. It also keeps the password out of the shared credential storage.
+        let credential: URLCredential = URLCredential(
+            user: proxyCredentials.user,
+            password: proxyCredentials.password,
+            persistence: .none
+        )
+        completionHandler(.useCredential, credential)
     }
 
     private func handleTaskClose(task: URLSessionWebSocketTask,
@@ -264,6 +314,16 @@ private final class URLSessionDelegateBox: NSObject, URLSessionWebSocketDelegate
         }
 
         delegate.urlSession?(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let delegate = delegate else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        delegate.urlSession?(session, task: task, didReceive: challenge, completionHandler: completionHandler)
     }
 }
 

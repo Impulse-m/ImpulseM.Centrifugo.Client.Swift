@@ -25,6 +25,9 @@ internal extension CentrifugeClient {
             if config.tlsChallengeHandler != nil {
                 log.warning("tlsChallengeHandler is set but has no effect on the Starscream transport")
             }
+            if config.proxyCredentialsProvider != nil {
+                log.warning("proxyCredentialsProvider is set but has no effect on the Starscream transport")
+            }
         }
     }
 }
