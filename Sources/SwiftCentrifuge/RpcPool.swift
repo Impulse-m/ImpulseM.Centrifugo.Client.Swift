@@ -9,7 +9,7 @@ import Foundation
 // and at the end of a later resend's delay. A call in flight carries its own deadline on its connection. A call
 // lost with its connection, refused with the later signal or moved by the reroute hook is resent while `retries`
 // and its deadline allow. A call that the redirect hook moves to bytes at a URL is settled by a fetch of those bytes
-// (RpcPoolRedirect.swift). The pool does not send tokens yet.
+// (RpcPoolRedirect.swift).
 
 /// A pool of connections for plain rpc calls: several connections per endpoint, a window of calls on each, and a
 /// bounded wait queue. The calls are plain requests, so their methods must be safe to run more than once.

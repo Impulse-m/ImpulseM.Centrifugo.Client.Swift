@@ -35,7 +35,7 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
 
     init(request: URLRequest, urlSessionConfigurationProvider: URLSessionConfigurationProvider?,
          tlsSkipVerify: Bool, tlsChallengeHandler: CentrifugeTLSChallengeHandler?,
-         proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?, queue: DispatchQueue, log: CentrifugeLogger) {
+         proxyCredentialsProvider: CentrifugeProxyCredentialsProvider? = nil, queue: DispatchQueue, log: CentrifugeLogger) {
         self.request = request
         self.log = log
         self.urlSessionConfigurationProvider = urlSessionConfigurationProvider ?? { URLSessionConfiguration.default }
@@ -141,7 +141,11 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
         let operationQueue = OperationQueue()
         operationQueue.underlyingQueue = queue
 
-        let configuration = urlSessionConfigurationProvider()
+        // The provider may return the same object every time, and the pool's connections ask the same
+        // provider. The headers below go into a copy, so they stay out of the application's object and
+        // out of the sessions that other connections make from it.
+        let provided = urlSessionConfigurationProvider()
+        let configuration = (provided.copy() as? URLSessionConfiguration) ?? provided
 
         // A `URLSessionWebSocketTask` started with a URLRequest may not respect the proxy
         // configuration (seen by Signal-iOS; on macOS 15 it reaches the proxy, but hangs
@@ -152,7 +156,14 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
         //
         // We copied this workaround from Signal-iOS web socket implementation
         var httpAdditionalHeaders = configuration.httpAdditionalHeaders ?? .init()
-        request.allHTTPHeaderFields?.forEach { httpAdditionalHeaders[$0.key] = $0.value }
+        request.allHTTPHeaderFields?.forEach { header in
+            // The subprotocol is the task's (see connect()). A header of that name, which the request gets
+            // from the configured headers, would compete with it, so it is left out.
+            if header.key.caseInsensitiveCompare("Sec-WebSocket-Protocol") == .orderedSame {
+                return
+            }
+            httpAdditionalHeaders[header.key] = header.value
+        }
         configuration.httpAdditionalHeaders = httpAdditionalHeaders
 
         let delegate = URLSessionDelegateBox(delegate: self)

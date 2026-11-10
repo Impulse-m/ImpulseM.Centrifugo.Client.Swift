@@ -11,42 +11,6 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct NativeWebSocketProxyAuthTests {
 
-    private final class DummySender: NSObject, URLAuthenticationChallengeSender {
-        func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
-        func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
-        func cancel(_ challenge: URLAuthenticationChallenge) {}
-    }
-
-    /// A thread-safe counter, for how many times the provider was called.
-    private final class CallCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var count = 0
-
-        func increment() {
-            lock.lock(); defer { lock.unlock() }
-            count += 1
-        }
-
-        var value: Int {
-            lock.lock(); defer { lock.unlock() }
-            return count
-        }
-    }
-
-    private func makeProxyChallenge(
-        authMethod: String = NSURLAuthenticationMethodHTTPBasic,
-        previousFailureCount: Int = 0
-    ) -> URLAuthenticationChallenge {
-        let space = URLProtectionSpace(
-            proxyHost: "127.0.0.1", port: 3128, type: NSURLProtectionSpaceHTTPProxy,
-            realm: "test", authenticationMethod: authMethod
-        )
-        return URLAuthenticationChallenge(
-            protectionSpace: space, proposedCredential: nil,
-            previousFailureCount: previousFailureCount, failureResponse: nil, error: nil, sender: DummySender()
-        )
-    }
-
     private func makeServerChallenge(authMethod: String) -> URLAuthenticationChallenge {
         let space = URLProtectionSpace(
             host: "example.com", port: 443, protocol: "https",
@@ -54,7 +18,7 @@ struct NativeWebSocketProxyAuthTests {
         )
         return URLAuthenticationChallenge(
             protectionSpace: space, proposedCredential: nil,
-            previousFailureCount: 0, failureResponse: nil, error: nil, sender: DummySender()
+            previousFailureCount: 0, failureResponse: nil, error: nil, sender: ChallengeSenderStub()
         )
     }
 
@@ -117,7 +81,9 @@ struct NativeWebSocketProxyAuthTests {
     }
 
     @Test func proxyBasicChallengeIsAnsweredWithProviderCredentials() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
         let ws = makeSocket(proxyCredentialsProvider: {
             CentrifugeProxyCredentials(user: "alice", password: "s3cret")
@@ -132,7 +98,9 @@ struct NativeWebSocketProxyAuthTests {
     }
 
     @Test func providerIsCalledAtChallengeTime() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
         var currentUser = "first"
         let ws = makeSocket(proxyCredentialsProvider: {
@@ -148,7 +116,9 @@ struct NativeWebSocketProxyAuthTests {
     }
 
     @Test func providerReturningNilCancelsWithoutCredential() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
         let ws = makeSocket(proxyCredentialsProvider: { nil }, queue: queue)
 
@@ -159,7 +129,9 @@ struct NativeWebSocketProxyAuthTests {
     }
 
     @Test func noProviderCancelsWithoutCredential() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
         let ws = makeSocket(proxyCredentialsProvider: nil, queue: queue)
 
@@ -170,11 +142,16 @@ struct NativeWebSocketProxyAuthTests {
     }
 
     @Test func repeatedRejectionCancelsWithoutCallingProvider() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
-        let calls = CallCounter()
+        // The provider runs on the socket's queue, so its count is shared through a locked box.
+        let calls: LockedBox<Int> = LockedBox<Int>(0)
         let ws = makeSocket(proxyCredentialsProvider: {
-            calls.increment()
+            calls.update { (value: inout Int) -> Void in
+                value += 1
+            }
             return CentrifugeProxyCredentials(user: "alice", password: "wrong")
         }, queue: queue)
 
@@ -182,15 +159,19 @@ struct NativeWebSocketProxyAuthTests {
 
         #expect(disposition == .cancelAuthenticationChallenge)
         #expect(credential == nil)
-        #expect(calls.value == 0)
+        #expect(calls.current == 0)
     }
 
     @Test func nonProxyBasicChallengePerformsDefaultHandlingWithoutCallingProvider() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         let queue = DispatchQueue(label: "test")
-        let calls = CallCounter()
+        let calls: LockedBox<Int> = LockedBox<Int>(0)
         let ws = makeSocket(proxyCredentialsProvider: {
-            calls.increment()
+            calls.update { (value: inout Int) -> Void in
+                value += 1
+            }
             return CentrifugeProxyCredentials(user: "alice", password: "s3cret")
         }, queue: queue)
 
@@ -199,17 +180,21 @@ struct NativeWebSocketProxyAuthTests {
 
         #expect(disposition == .performDefaultHandling)
         #expect(credential == nil)
-        #expect(calls.value == 0)
+        #expect(calls.current == 0)
     }
 
     @Test func serverTrustChallengeKeepsSessionLevelHandlingWithProviderSet() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         // A provider does not change the session-level path: with nothing else set, a server-trust
         // challenge still gets default handling, and the provider is not asked.
         let queue = DispatchQueue(label: "test")
-        let calls = CallCounter()
+        let calls: LockedBox<Int> = LockedBox<Int>(0)
         let ws = makeSocket(proxyCredentialsProvider: {
-            calls.increment()
+            calls.update { (value: inout Int) -> Void in
+                value += 1
+            }
             return CentrifugeProxyCredentials(user: "alice", password: "s3cret")
         }, queue: queue)
 
@@ -219,20 +204,24 @@ struct NativeWebSocketProxyAuthTests {
 
         #expect(disposition == .performDefaultHandling)
         #expect(credential == nil)
-        #expect(calls.value == 0)
+        #expect(calls.current == 0)
     }
 
     @Test func serverTrustChallengeStillReachesTLSChallengeHandler() {
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
         // tlsChallengeHandler keeps receiving the session-level challenges, with a provider set too.
         let queue = DispatchQueue(label: "test")
-        let calls = CallCounter()
+        let calls: LockedBox<Int> = LockedBox<Int>(0)
         var receivedAuthMethod: String?
         let ws = makeSocket(tlsChallengeHandler: { challenge, completion in
             receivedAuthMethod = challenge.protectionSpace.authenticationMethod
             completion(.cancelAuthenticationChallenge, nil)
         }, proxyCredentialsProvider: {
-            calls.increment()
+            calls.update { (value: inout Int) -> Void in
+                value += 1
+            }
             return CentrifugeProxyCredentials(user: "alice", password: "s3cret")
         }, queue: queue)
 
@@ -242,6 +231,6 @@ struct NativeWebSocketProxyAuthTests {
 
         #expect(disposition == .cancelAuthenticationChallenge)
         #expect(receivedAuthMethod == NSURLAuthenticationMethodServerTrust)
-        #expect(calls.value == 0)
+        #expect(calls.current == 0)
     }
 }

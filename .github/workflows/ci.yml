@@ -8,6 +8,8 @@ jobs:
   test:
     name: Test
     runs-on: macos-15
+    # A test that hangs must fail the run instead of holding a runner for hours.
+    timeout-minutes: 20
     # Prevent duplicate builds on internal PRs. Release runs (workflow_dispatch or
     # workflow_call) always run the tests.
     if: >-
@@ -78,7 +80,7 @@ jobs:
         run: echo "127.0.0.1 centrifugo.proxy.test" | sudo tee -a /etc/hosts
       - name: Run tests
         # Same entry point as local runs; defers to plain `swift test` here
-        # because the runner has Xcode. See CLAUDE.md.
+        # because the runner has Xcode.
         env:
           CENTRIFUGE_PROXY_TEST_HOST: centrifugo.proxy.test
         run: ./scripts/test.sh --verbose
