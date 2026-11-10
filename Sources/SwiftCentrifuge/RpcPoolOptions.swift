@@ -79,8 +79,10 @@ public struct CentrifugeRpcPoolOptions {
 
     /// The session whose transport settings (proxy, TLS, timeouts) the redirect fetches keep. The pool uses its own
     /// delegate, and never the headers, cookies, stored credentials or cache of the session. Nil means the main client's
-    /// `urlSessionConfigurationProvider` when it has one, asked for each fetch, and an ephemeral session otherwise. The
-    /// proxy's credentials of the fetches are the main client's `proxyCredentialsProvider`, whatever this is.
+    /// `urlSessionConfigurationProvider` when it has one: it is asked for each fetch, and the fetches share one session while
+    /// the transport settings it returns stay the same. With neither, the fetches use an ephemeral session. The server's
+    /// certificate is checked by the system: the main client's `tlsSkipVerify` and `tlsChallengeHandler` do not apply to a
+    /// fetch. The proxy's credentials of the fetches are the main client's `proxyCredentialsProvider`, whatever this is.
     public var urlSession: URLSession?
 
     /// Whether the connections take their token from the main client: the client's confirmed token is lent to each

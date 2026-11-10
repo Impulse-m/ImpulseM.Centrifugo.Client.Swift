@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Network)
+import Network
+#endif
 
 // The redirect of a pool call: the outcome the hook sees, the URL check, and the fetch of the bytes. A fetch follows
 // no hop, sends only the redirect headers, carries no cookies or credentials, and reads its body under a limit as the
@@ -88,8 +91,8 @@ internal func urlWithoutFragment(_ url: URL) -> String {
 }
 
 
-/// Where the redirect fetches of a pool take their transport settings: the configuration, and whether each fetch asks
-/// for it again (`perFetch`), so that a session made from a provider is current for every fetch.
+/// Where the redirect fetches of a pool take their transport settings: the configuration, and whether it is asked again
+/// for each fetch (`perFetch`), so that the session follows the settings a provider returns now.
 internal struct RpcPoolRedirectSource {
     internal let configuration: () -> URLSessionConfiguration
 
@@ -98,7 +101,8 @@ internal struct RpcPoolRedirectSource {
 
 
 /// The source of the redirect fetches. The pool's `urlSession` wins when it is set, and it is read once. Otherwise the
-/// main client's `urlSessionConfigurationProvider` is asked for each fetch. Otherwise the fetches use an ephemeral session.
+/// main client's `urlSessionConfigurationProvider` is asked for each fetch, and the session is kept while its settings
+/// stay the same (RpcPoolFetchSessions). Otherwise the fetches use an ephemeral session.
 internal func redirectSource(
     urlSession: URLSession?,
     mainProvider: URLSessionConfigurationProvider?
@@ -121,9 +125,11 @@ internal func redirectSource(
 
 
 /// The configuration of a pool's redirect session. It is a fresh ephemeral configuration: the given configuration
-/// contributes only its transport settings (proxy, TLS, timeouts, URL protocol classes, waiting for connectivity).
+/// contributes only its transport settings (the proxy dictionary and the proxy configurations, the TLS protocol versions,
+/// timeouts, URL protocol classes, waiting for connectivity).
 /// Its headers, cookies, stored credentials and cache are never copied, so an application header such as
-/// `Authorization` never reaches the host that a redirect names.
+/// `Authorization` never reaches the host that a redirect names. The comparison in `sameRedirectTransport` covers the
+/// same settings: a change here goes with a change there.
 internal func redirectSessionConfiguration(_ source: URLSessionConfiguration?) -> URLSessionConfiguration {
     let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
@@ -134,6 +140,11 @@ internal func redirectSessionConfiguration(_ source: URLSessionConfiguration?) -
         return configuration
     }
     configuration.connectionProxyDictionary = source.connectionProxyDictionary
+    #if canImport(Network)
+    if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) {
+        configuration.proxyConfigurations = source.proxyConfigurations
+    }
+    #endif
     if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
         configuration.tlsMinimumSupportedProtocolVersion = source.tlsMinimumSupportedProtocolVersion
         configuration.tlsMaximumSupportedProtocolVersion = source.tlsMaximumSupportedProtocolVersion
@@ -147,6 +158,132 @@ internal func redirectSessionConfiguration(_ source: URLSessionConfiguration?) -
     configuration.protocolClasses = source.protocolClasses
     configuration.waitsForConnectivity = source.waitsForConnectivity
     return configuration
+}
+
+
+/// Whether two configurations of a redirect session give a fetch the same transport: the settings that
+/// `redirectSessionConfiguration` copies, and nothing else. A session is kept only while this holds. Proxy
+/// configurations cannot be compared, so a configuration that has any matches nothing, and its session serves one fetch.
+internal func sameRedirectTransport(_ left: URLSessionConfiguration, _ right: URLSessionConfiguration) -> Bool {
+    if !sameProxyDictionary(left.connectionProxyDictionary, right.connectionProxyDictionary) {
+        return false
+    }
+    #if canImport(Network)
+    if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) {
+        if !left.proxyConfigurations.isEmpty || !right.proxyConfigurations.isEmpty {
+            return false
+        }
+    }
+    #endif
+    if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+        if left.tlsMinimumSupportedProtocolVersion != right.tlsMinimumSupportedProtocolVersion {
+            return false
+        }
+        if left.tlsMaximumSupportedProtocolVersion != right.tlsMaximumSupportedProtocolVersion {
+            return false
+        }
+    } else {
+        if left.tlsMinimumSupportedProtocol != right.tlsMinimumSupportedProtocol {
+            return false
+        }
+        if left.tlsMaximumSupportedProtocol != right.tlsMaximumSupportedProtocol {
+            return false
+        }
+    }
+    if left.timeoutIntervalForRequest != right.timeoutIntervalForRequest {
+        return false
+    }
+    if left.timeoutIntervalForResource != right.timeoutIntervalForResource {
+        return false
+    }
+    if left.waitsForConnectivity != right.waitsForConnectivity {
+        return false
+    }
+    return sameClasses(left.protocolClasses, right.protocolClasses)
+}
+
+
+/// Whether two proxy dictionaries are the same: both absent, or equal key by key.
+private func sameProxyDictionary(_ left: [AnyHashable: Any]?, _ right: [AnyHashable: Any]?) -> Bool {
+    guard let leftValues: [AnyHashable: Any] = left, let rightValues: [AnyHashable: Any] = right else {
+        return left == nil && right == nil
+    }
+    return NSDictionary(dictionary: leftValues).isEqual(to: rightValues)
+}
+
+
+/// Whether two lists of URL protocol classes are the same classes in the same order.
+private func sameClasses(_ left: [AnyClass]?, _ right: [AnyClass]?) -> Bool {
+    guard let leftClasses: [AnyClass] = left, let rightClasses: [AnyClass] = right else {
+        return left == nil && right == nil
+    }
+    let leftIdentifiers: [ObjectIdentifier] = leftClasses.map { (item: AnyClass) -> ObjectIdentifier in
+        return ObjectIdentifier(item)
+    }
+    let rightIdentifiers: [ObjectIdentifier] = rightClasses.map { (item: AnyClass) -> ObjectIdentifier in
+        return ObjectIdentifier(item)
+    }
+    return leftIdentifiers == rightIdentifiers
+}
+
+
+/// The session that a pool's redirect fetches run on. A source that is asked for each fetch keeps its session while the
+/// transport settings it returns stay the same, so the fetches share connections. When the settings change, the next
+/// fetch gets a new session, and the fetches in flight end on the old one, which ends with its last task. The pool calls
+/// it on its queue.
+internal final class RpcPoolFetchSessions {
+    private let source: RpcPoolRedirectSource
+
+    /// Makes a session from a configuration. The owner gives the delegate and the queue of the session.
+    private let make: (URLSessionConfiguration) -> URLSession
+
+    private var session: URLSession? = nil
+
+    /// The configuration that `session` was made from, which the next answer of the source is compared with.
+    private var settings: URLSessionConfiguration? = nil
+
+
+    internal init(
+        source: RpcPoolRedirectSource,
+        make: @escaping (URLSessionConfiguration) -> URLSession
+    ) {
+        self.source = source
+        self.make = make
+    }
+
+
+    /// The session for a fetch that starts now.
+    internal func current() -> URLSession {
+        if let existing: URLSession = session, !source.perFetch {
+            return existing
+        }
+        let asked: URLSessionConfiguration = source.configuration()
+        if let existing: URLSession = session, let made: URLSessionConfiguration = settings, sameRedirectTransport(made, asked) {
+            return existing
+        }
+        // The fetches in flight keep the old session until they end. It takes no new task.
+        session?.finishTasksAndInvalidate()
+        let created: URLSession = make(asked)
+        session = created
+        settings = asked
+        return created
+    }
+
+
+    /// Ends the session at once, with the tasks it still runs.
+    internal func close() {
+        session?.invalidateAndCancel()
+        session = nil
+        settings = nil
+    }
+
+
+    /// Ends the session once its tasks are done.
+    internal func finish() {
+        session?.finishTasksAndInvalidate()
+        session = nil
+        settings = nil
+    }
 }
 
 
@@ -241,7 +378,9 @@ internal final class RpcPoolFetchBody {
 internal final class RpcPoolFetchDelegate: NSObject, URLSessionDataDelegate {
     private let lock: NSLock = NSLock()
 
-    private var bodies: [Int: RpcPoolFetchBody] = [:]
+    /// The body of each task, by the task object. A task identifier is unique only within one session, and this delegate
+    /// serves every session of the pool's fetches, so the identifier cannot be the key.
+    private var bodies: [ObjectIdentifier: RpcPoolFetchBody] = [:]
 
     /// The main client's provider of the proxy's credentials, asked at each proxy challenge on the session's queue.
     private let proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
@@ -254,9 +393,9 @@ internal final class RpcPoolFetchDelegate: NSObject, URLSessionDataDelegate {
 
 
     /// Registers the body of a task. Called before the task starts.
-    internal func register(_ identifier: Int, _ body: RpcPoolFetchBody) {
+    internal func register(_ task: URLSessionTask, _ body: RpcPoolFetchBody) {
         lock.lock()
-        bodies[identifier] = body
+        bodies[ObjectIdentifier(task)] = body
         lock.unlock()
     }
 
@@ -330,7 +469,7 @@ internal final class RpcPoolFetchDelegate: NSObject, URLSessionDataDelegate {
         defer {
             lock.unlock()
         }
-        return bodies[task.taskIdentifier]
+        return bodies[ObjectIdentifier(task)]
     }
 
 
@@ -339,8 +478,8 @@ internal final class RpcPoolFetchDelegate: NSObject, URLSessionDataDelegate {
         defer {
             lock.unlock()
         }
-        let body: RpcPoolFetchBody? = bodies[task.taskIdentifier]
-        bodies[task.taskIdentifier] = nil
+        let body: RpcPoolFetchBody? = bodies[ObjectIdentifier(task)]
+        bodies[ObjectIdentifier(task)] = nil
         return body
     }
 }
@@ -391,22 +530,17 @@ internal final class RpcPoolFetch {
 }
 
 
-/// The redirect fetches of one pool: the slots they hold, the line of fetches that wait for one, and the session that
-/// runs them. The pool calls it on its queue; the session reports back to that queue.
+/// The redirect fetches of one pool: the slots they hold, the line of fetches that wait for one, and the sessions that
+/// run them. The pool calls it on its queue; the sessions report back to that queue.
 internal final class RpcPoolFetches {
     private let queue: DispatchQueue
 
     private let limit: Int
 
-    /// The transport settings of a session, asked when the session is made: once for the cached session, or for each
-    /// fetch with `perFetch`.
-    private let configuration: () -> URLSessionConfiguration
-
-    private let perFetch: Bool
-
     private let delegate: RpcPoolFetchDelegate
 
-    private var session: URLSession? = nil
+    /// The sessions of the fetches: one, kept while the transport settings stay the same (RpcPoolFetchSessions).
+    private let sessions: RpcPoolFetchSessions
 
     /// The fetches that hold a slot, by the call they serve. A call has at most one fetch.
     private var running: [ObjectIdentifier: RpcPoolFetch] = [:]
@@ -429,14 +563,19 @@ internal final class RpcPoolFetches {
     ) {
         self.queue = queue
         self.limit = limit
-        self.configuration = source.configuration
-        self.perFetch = source.perFetch
-        self.delegate = RpcPoolFetchDelegate(proxyCredentialsProvider: proxyCredentialsProvider)
+        let delegate: RpcPoolFetchDelegate = RpcPoolFetchDelegate(proxyCredentialsProvider: proxyCredentialsProvider)
+        self.delegate = delegate
+        self.sessions = RpcPoolFetchSessions(source: source) { (configuration: URLSessionConfiguration) -> URLSession in
+            // The callbacks of a session run on one serial queue of its own.
+            let operations: OperationQueue = OperationQueue()
+            operations.maxConcurrentOperationCount = 1
+            return URLSession(configuration: configuration, delegate: delegate, delegateQueue: operations)
+        }
     }
 
 
     deinit {
-        session?.finishTasksAndInvalidate()
+        sessions.finish()
     }
 
 
@@ -478,7 +617,7 @@ internal final class RpcPoolFetches {
     }
 
 
-    /// Cancels every fetch and ends the session. The pool settles the calls.
+    /// Cancels every fetch and ends the sessions. The pool settles the calls.
     internal func close() {
         for fetch: RpcPoolFetch in running.values {
             fetch.task?.cancel()
@@ -487,8 +626,7 @@ internal final class RpcPoolFetches {
         waiting = [:]
         waitingOrder = []
         waitingHead = 0
-        session?.invalidateAndCancel()
-        session = nil
+        sessions.close()
     }
 
 
@@ -568,16 +706,12 @@ internal final class RpcPoolFetches {
                 self?.completed(fetch, outcome)
             }
         }
-        // A per-fetch session is made for this fetch alone, from the configuration asked now, and ends once its task does.
-        let target: URLSession = perFetch ? makeSession() : currentSession()
+        let target: URLSession = sessions.current()
         let task: URLSessionDataTask = target.dataTask(with: fetch.makeRequest())
         fetch.task = task
         running[ObjectIdentifier(fetch.call)] = fetch
-        delegate.register(task.taskIdentifier, body)
+        delegate.register(task, body)
         task.resume()
-        if perFetch {
-            target.finishTasksAndInvalidate()
-        }
     }
 
 
@@ -596,24 +730,5 @@ internal final class RpcPoolFetches {
         case .failure(let failure):
             fetch.onDone(.failure(CentrifugeError.replyError(code: rpcCodeRedirectFailed, message: failure.message, temporary: false)))
         }
-    }
-
-
-    /// The session of the fetches, made on the first fetch. Its callbacks run on one serial queue of their own.
-    private func currentSession() -> URLSession {
-        if let existing: URLSession = session {
-            return existing
-        }
-        let created: URLSession = makeSession()
-        session = created
-        return created
-    }
-
-
-    /// A session for the fetches, with its callbacks on one serial queue of its own.
-    private func makeSession() -> URLSession {
-        let operations: OperationQueue = OperationQueue()
-        operations.maxConcurrentOperationCount = 1
-        return URLSession(configuration: configuration(), delegate: delegate, delegateQueue: operations)
     }
 }

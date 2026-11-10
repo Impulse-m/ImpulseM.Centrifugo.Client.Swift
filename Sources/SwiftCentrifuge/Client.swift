@@ -177,6 +177,7 @@ public struct CentrifugeClientConfig {
     ///   - urlSessionConfigurationProvider: An optional closure that provides a custom `URLSessionConfiguration`.
     ///   If not provided, `URLSessionConfiguration.default` will be used.
     /// - Note: This option is available on iOS 13.0 and later. It provides a modern WebSocket implementation.
+    /// - Note: The SDK works on a copy of the returned configuration. The RPC pool asks the same provider for its connections and for its redirect fetches; the fetches use it with either transport.
     public var urlSessionConfigurationProvider: URLSessionConfigurationProvider?
 
     /// Applied when `useNativeWebSocket == true`. Lets the app answer every challenge the
@@ -213,7 +214,7 @@ public struct CentrifugeClientConfig {
     /// connection fails. The provider is called at each challenge, so it returns the current credentials.
     /// Nil, or a provider that returns nil, fails the connection attempt. Starscream ignores this setting.
     /// The RPC pool's connections and redirect fetches use it too, through the same provider.
-    /// - Note: Called on an internal queue of the SDK (the client's queue, or the pool's fetch queue for redirects),
+    /// - Note: Called on an internal queue of the SDK (the client's queue, or the delegate queue of the pool's redirect session),
     /// never on the main thread. It must be fast and must not block.
     public var proxyCredentialsProvider: CentrifugeProxyCredentialsProvider?
 
@@ -257,8 +258,8 @@ public typealias URLSessionConfigurationProvider = (() -> URLSessionConfiguratio
 /// `challenge.protectionSpace.authenticationMethod` itself before deciding, typically
 /// deferring anything else with `completionHandler(.performDefaultHandling, nil)`. Call the
 /// completion handler exactly once. HTTP Basic/Digest challenges never reach this handler —
-/// those are task-level only, and this transport doesn't implement that delegate method. If
-/// not set, the system default handling is used.
+/// those are task-level: the transport answers a proxy's Basic challenge with `proxyCredentialsProvider`
+/// and leaves the others to the default handling. If not set, the system default handling is used.
 /// - Note: Only applies when `useNativeWebSocket == true`. Starscream has no equivalent to
 /// this handler — its only TLS option is `tlsSkipVerify`, which disables verification
 /// entirely rather than allowing custom trust logic or client certificates.
