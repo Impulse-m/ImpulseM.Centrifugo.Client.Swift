@@ -8,6 +8,8 @@ jobs:
   test:
     name: Test
     runs-on: macos-15
+    # A test that hangs must fail the run instead of holding a runner for hours.
+    timeout-minutes: 20
     # Prevent duplicate builds on internal PRs. Release runs (workflow_dispatch or
     # workflow_call) always run the tests.
     if: >-
