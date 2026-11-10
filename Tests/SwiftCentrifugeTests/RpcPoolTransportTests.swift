@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import SwiftCentrifuge
 
@@ -188,5 +189,33 @@ struct RpcPoolTransportTests {
             disposition = value
         }
         #expect(disposition == .cancelAuthenticationChallenge)
+    }
+
+    /// Guards the proxy of a redirect fetch that takes its session from `proxyConfigurations` (iOS 17 / macOS 14), which
+    /// is a separate setting from the proxy dictionary, so the copy of the transport settings must carry it too.
+    @Test func redirectKeepsTheProxyConfigurationsOfItsSource() {
+        guard #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) else {
+            return
+        }
+        let given: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        let proxyEndpoint: NWEndpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: 3128)!
+        )
+        given.proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: proxyEndpoint)]
+
+        let fromProvider: RpcPoolRedirectSource = redirectSource(
+            urlSession: nil,
+            mainProvider: { () -> URLSessionConfiguration in
+                return given
+            }
+        )
+        #expect(fromProvider.configuration().proxyConfigurations.count == 1)
+
+        let fromSession: RpcPoolRedirectSource = redirectSource(
+            urlSession: URLSession(configuration: given),
+            mainProvider: nil
+        )
+        #expect(fromSession.configuration().proxyConfigurations.count == 1)
     }
 }

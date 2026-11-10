@@ -311,11 +311,16 @@ private func redirectOptions(
     maxRedirectsInflight: Int = 4,
     maxQueued: Int = 64,
     additionalHeaders: [AnyHashable: Any]? = nil,
+    ownSession: Bool = true,
     redirect: ((CentrifugeReplyOutcome) -> CentrifugeRedirect?)?
 ) -> CentrifugeRpcPoolOptions {
     let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [RedirectStubProtocol.self]
     configuration.httpAdditionalHeaders = additionalHeaders
+    var urlSession: URLSession? = nil
+    if ownSession {
+        urlSession = URLSession(configuration: configuration)
+    }
     return CentrifugeRpcPoolOptions(
         endpoints: { (_: String) -> [String] in
             return [fakeURL]
@@ -323,8 +328,18 @@ private func redirectOptions(
         maxQueued: maxQueued,
         redirect: redirect,
         maxRedirectsInflight: maxRedirectsInflight,
-        urlSession: URLSession(configuration: configuration)
+        urlSession: urlSession
     )
+}
+
+
+/// The configuration that the main client's provider returns in the tests of the provider source. The fetches run on
+/// the stub, and the request timeout is the test's, so that a test can change the transport settings between fetches.
+private func stubProviderConfiguration(requestTimeout: TimeInterval) -> URLSessionConfiguration {
+    let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [RedirectStubProtocol.self]
+    configuration.timeoutIntervalForRequest = requestTimeout
+    return configuration
 }
 
 
@@ -347,11 +362,11 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
     // MARK: helpers
 
     /// A main client on the manual clock and scheduler, connected to the fake server.
-    private func connectedMain() async -> RedirectMainHarness {
+    private func connectedMain(config: CentrifugeClientConfig = CentrifugeClientConfig()) async -> RedirectMainHarness {
         let delegate: RecordingClientDelegate = RecordingClientDelegate(connected: Expectation("connected"))
         let setup: ManualClientSetup = makeManualClient(
             endpoint: fake.server.url,
-            config: CentrifugeClientConfig(),
+            config: config,
             delegate: delegate
         )
         setup.client.connect()
@@ -380,9 +395,24 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
 
 
     /// Starts two calls whose replies carry the redirects to "/first" and "/second". Returns once both hooks have run
-    /// and the pool has handled the second call: it waits for a slot, or it has failed at once.
-    private func startHeldRedirects(maxQueued: Int, maxRedirectsInflight: Int) async -> HeldRedirects {
-        let main: RedirectMainHarness = await connectedMain()
+    /// and the pool has handled the second call: it waits for a slot, or it has failed at once. With `providerTimeout`,
+    /// the pool has no session of its own, so the fetches take their settings from the main client's provider.
+    private func startHeldRedirects(
+        maxQueued: Int,
+        maxRedirectsInflight: Int,
+        providerTimeout: LockedBox<TimeInterval>? = nil,
+        beforeSecond: (() -> Void)? = nil
+    ) async -> HeldRedirects {
+        var config: CentrifugeClientConfig = CentrifugeClientConfig()
+        var ownSession: Bool = true
+        if let timeout: LockedBox<TimeInterval> = providerTimeout {
+            let provider: URLSessionConfigurationProvider = { () -> URLSessionConfiguration in
+                return stubProviderConfiguration(requestTimeout: timeout.current)
+            }
+            config = CentrifugeClientConfig(urlSessionConfigurationProvider: provider)
+            ownSession = false
+        }
+        let main: RedirectMainHarness = await connectedMain(config: config)
         let counter: LockedBox<Int> = LockedBox(0)
         let firstHook: Expectation = Expectation("first redirect hooked")
         let secondHook: Expectation = Expectation("second redirect hooked")
@@ -402,6 +432,7 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
                 fakeURL: fake.server.url,
                 maxRedirectsInflight: maxRedirectsInflight,
                 maxQueued: maxQueued,
+                ownSession: ownSession,
                 redirect: hook
             )
         )
@@ -417,6 +448,7 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
         let firstCall: CentrifugeRpcCall = startCall(pool, first)
         await fulfillment(of: firstHook, within: 5)
         await awaitSyncQueue(main.client)
+        beforeSecond?()
         let secondCall: CentrifugeRpcCall = startCall(pool, second)
         await fulfillment(of: secondHook, within: 5)
         await awaitSyncQueue(main.client)
@@ -771,5 +803,93 @@ final class RpcPoolRedirectTests: @unchecked Sendable {
         #expect(pool.stats().redirects == 0)
         withExtendedLifetime(pool) {}
         withExtendedLifetime(main.delegate) {}
+    }
+
+
+    // MARK: the main client's provider as the source of the fetches
+
+    /// Guards the bodies of two fetches from the main client's provider that run at once: the fetch that is held must
+    /// still receive its own bytes after the other one ends.
+    @Test func fetchesFromTheMainProviderEachGetTheirOwnBytes() async throws {
+        fake.setAnswer(plainAnswer)
+        RedirectStubProtocol.book.setRule { (request: URLRequest) -> StubAnswer in
+            return holdFirstAnswerOthers(request)
+        }
+        let held: HeldRedirects = await startHeldRedirects(
+            maxQueued: 64,
+            maxRedirectsInflight: 2,
+            providerTimeout: LockedBox<TimeInterval>(30)
+        )
+        await fulfillment(of: held.second.done, within: 5)
+        #expect(held.second.data == Data("second".utf8))
+        #expect(held.pool.stats().redirects == 1)
+
+        RedirectStubProtocol.releaseHeld(Data("first".utf8))
+        await fulfillment(of: held.first.done, within: 5)
+        #expect(held.first.data == Data("first".utf8))
+        withExtendedLifetime(held.pool) {}
+        withExtendedLifetime(held.main.delegate) {}
+    }
+
+
+    /// Guards a fetch in flight when the provider's settings change: the first fetch was made from the old settings,
+    /// and the second from the new ones. The first fetch must keep its bytes, and the second must not disturb it.
+    @Test func aFetchInFlightKeepsItsBytesWhenTheProviderSettingsChange() async throws {
+        fake.setAnswer(plainAnswer)
+        RedirectStubProtocol.book.setRule { (request: URLRequest) -> StubAnswer in
+            return holdFirstAnswerOthers(request)
+        }
+        let timeout: LockedBox<TimeInterval> = LockedBox<TimeInterval>(30)
+        let held: HeldRedirects = await startHeldRedirects(
+            maxQueued: 64,
+            maxRedirectsInflight: 2,
+            providerTimeout: timeout,
+            beforeSecond: { () -> Void in
+                timeout.set(45)
+            }
+        )
+        await fulfillment(of: held.second.done, within: 5)
+        #expect(held.second.data == Data("second".utf8))
+        #expect(held.pool.stats().redirects == 1)
+
+        RedirectStubProtocol.releaseHeld(Data("first".utf8))
+        await fulfillment(of: held.first.done, within: 5)
+        #expect(held.first.data == Data("first".utf8))
+        withExtendedLifetime(held.pool) {}
+        withExtendedLifetime(held.main.delegate) {}
+    }
+
+
+    /// Guards the line behind a cancelled fetch from the main client's provider: the next fetch starts when the slot is
+    /// freed, before the cancelled one is reported as ended, and it must still receive its own bytes.
+    @Test func aCancelledFetchFromTheMainProviderLeavesTheNextOneItsBytes() async throws {
+        fake.setAnswer(plainAnswer)
+        RedirectStubProtocol.book.setRule { (_: URLRequest) -> StubAnswer in
+            return .hold
+        }
+        let held: HeldRedirects = await startHeldRedirects(
+            maxQueued: 64,
+            maxRedirectsInflight: 1,
+            providerTimeout: LockedBox<TimeInterval>(30)
+        )
+        // The second fetch is not requested until the slot frees, so the arrival of "/second" is awaited after the cancel.
+        let secondArrived: Expectation = Expectation("second fetch arrived")
+        RedirectStubProtocol.book.setArrival { (request: URLRequest) -> Void in
+            if request.url?.path == "/second" {
+                secondArrived.fulfill()
+            }
+        }
+        held.firstCall.cancel()
+        await fulfillment(of: held.first.done, within: 5)
+        #expect(kindOf(held.first.error) == "replyError 17")
+        await fulfillment(of: secondArrived, within: 5)
+        await awaitSyncQueue(held.main.client)
+
+        RedirectStubProtocol.releaseHeld(Data("second".utf8))
+        await fulfillment(of: held.second.done, within: 5)
+        #expect(held.second.data == Data("second".utf8))
+        withExtendedLifetime(held.pool) {}
+        withExtendedLifetime(held.firstCall) {}
+        withExtendedLifetime(held.main.delegate) {}
     }
 }

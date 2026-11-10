@@ -46,4 +46,43 @@ struct NativeWebSocketTaskTests {
         #expect(sessionHeaders?["X-App-Header"] as? String == "app-value")
         #expect(sessionHeaders?["Sec-WebSocket-Protocol"] == nil)
     }
+
+    /// Guards the application's configuration: the request's headers belong to the session the socket makes, so the
+    /// configuration that the provider returned must come back with no header of the request.
+    @Test func theProvidersConfigurationIsLeftUnchanged() {
+        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+            return
+        }
+        let shared: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        let endpoint: URL = URL(string: "ws://127.0.0.1:1/connection/websocket")!
+        var request: URLRequest = URLRequest(url: endpoint)
+        request.setValue("app-value", forHTTPHeaderField: "X-App-Header")
+
+        let queue: DispatchQueue = DispatchQueue(label: "test")
+        let provider: URLSessionConfigurationProvider = { () -> URLSessionConfiguration in
+            return shared
+        }
+        let ws: NativeWebSocket = NativeWebSocket(
+            request: request,
+            urlSessionConfigurationProvider: provider,
+            tlsSkipVerify: false,
+            tlsChallengeHandler: nil,
+            proxyCredentialsProvider: nil,
+            queue: queue,
+            log: EmptyLogger.instance
+        )
+
+        // The task factory runs on the socket's queue, so the headers it records are shared through a locked box.
+        let recorded: LockedBox<[AnyHashable: Any]?> = LockedBox<[AnyHashable: Any]?>(nil)
+        ws.makeTask = { session, url, protocols in
+            recorded.set(session.configuration.httpAdditionalHeaders)
+            return session.webSocketTask(with: URL(string: "ws://127.0.0.1:1/")!)
+        }
+
+        queue.sync { ws.connect() }
+        queue.sync { ws.close() }
+
+        #expect(recorded.current?["X-App-Header"] as? String == "app-value")
+        #expect(shared.httpAdditionalHeaders == nil)
+    }
 }
