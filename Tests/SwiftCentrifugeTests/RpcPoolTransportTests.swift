@@ -9,23 +9,6 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct RpcPoolTransportTests {
 
-    private final class DummySender: NSObject, URLAuthenticationChallengeSender {
-        func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
-        func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
-        func cancel(_ challenge: URLAuthenticationChallenge) {}
-    }
-
-    private func makeProxyChallenge() -> URLAuthenticationChallenge {
-        let space: URLProtectionSpace = URLProtectionSpace(
-            proxyHost: "127.0.0.1", port: 3128, type: NSURLProtectionSpaceHTTPProxy,
-            realm: "test", authenticationMethod: NSURLAuthenticationMethodHTTPBasic
-        )
-        return URLAuthenticationChallenge(
-            protectionSpace: space, proposedCredential: nil,
-            previousFailureCount: 0, failureResponse: nil, error: nil, sender: DummySender()
-        )
-    }
-
     private func makeOptions(urlSession: URLSession? = nil) -> CentrifugeRpcPoolOptions {
         return CentrifugeRpcPoolOptions(
             endpoints: { (_: String) -> [String] in

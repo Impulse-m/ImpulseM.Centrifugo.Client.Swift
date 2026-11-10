@@ -16,8 +16,9 @@ import Testing
 /// the server; the "no server reply" checks rely on that.
 ///
 /// The suite needs `CENTRIFUGE_PROXY_TEST_HOST` set to that host name, and `/etc/hosts` mapping it to 127.0.0.1
-/// (ci.yml does both). Without the variable every test returns early.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+/// (ci.yml does both). Without the variable the suite is disabled and reported as skipped, and
+/// `ProxyTestEnvironmentTests` fails a CI run without it.
+@Suite(.serialized, .timeLimit(.minutes(2)), .enabled(if: proxyTestHost() != nil, "CENTRIFUGE_PROXY_TEST_HOST is not set"))
 struct RpcPoolProxyIntegrationTests {
 
     /// How the credentials provider answers the proxy's challenge once the main client is connected.
@@ -36,71 +37,12 @@ struct RpcPoolProxyIntegrationTests {
         /// The proxy's 407 answers before and after the pool call.
         let rejectedBefore: Int
         let rejectedAfter: Int
+        /// The main client's provider calls before and after the pool call. A pool connection asks both providers.
+        let credentialCallsBefore: Int
+        let credentialCallsAfter: Int
+        let configurationCallsBefore: Int
+        let configurationCallsAfter: Int
         let proxy: AuthProxy
-    }
-
-    /// Counts how many times the credentials provider was called, from the client's queue.
-    private final class CallCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var count = 0
-
-        func increment() {
-            lock.lock(); defer { lock.unlock() }
-            count += 1
-        }
-
-        var value: Int {
-            lock.lock(); defer { lock.unlock() }
-            return count
-        }
-    }
-
-    /// Keeps the result of a pool call, which settles on the pool's queue.
-    private final class ResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored: Result<CentrifugeRpcResult, Error>?
-
-        func set(_ result: Result<CentrifugeRpcResult, Error>) {
-            lock.lock(); defer { lock.unlock() }
-            stored = result
-        }
-
-        var value: Result<CentrifugeRpcResult, Error>? {
-            lock.lock(); defer { lock.unlock() }
-            return stored
-        }
-    }
-
-    private final class ConnectWatcher: CentrifugeClientDelegate, @unchecked Sendable {
-        let connected: Expectation
-
-        init(connected: Expectation) {
-            self.connected = connected
-        }
-
-        func onConnected(_ client: CentrifugeClient, _ event: CentrifugeConnectedEvent) {
-            connected.fulfill()
-        }
-    }
-
-    private static func proxyHost() -> String? {
-        let value: String? = ProcessInfo.processInfo.environment["CENTRIFUGE_PROXY_TEST_HOST"]
-        return value?.isEmpty == false ? value : nil
-    }
-
-    /// The HTTP and HTTPS keys of `connectionProxyDictionary`, both pointing at the proxy.
-    private static func dictionaryConfiguration(proxyPort: UInt16) -> URLSessionConfiguration {
-        let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
-        let proxyDictionary: [AnyHashable: Any] = [
-            kCFNetworkProxiesHTTPEnable as String: 1,
-            kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
-            kCFNetworkProxiesHTTPPort as String: Int(proxyPort),
-            "HTTPSEnable": 1,
-            "HTTPSProxy": "127.0.0.1",
-            "HTTPSPort": Int(proxyPort),
-        ]
-        configuration.connectionProxyDictionary = proxyDictionary
-        return configuration
     }
 
     /// Whether a pool call's result is an answer of the server.
@@ -143,18 +85,27 @@ struct RpcPoolProxyIntegrationTests {
         try proxy.start()
         defer { proxy.stop() }
 
-        let providerCalls: CallCounter = CallCounter()
+        // The providers run on the clients' queues, so their counts are shared through locked boxes.
+        let credentialCalls: LockedBox<Int> = LockedBox<Int>(0)
+        let configurationCalls: LockedBox<Int> = LockedBox<Int>(0)
         let mainConnected: Expectation = Expectation("main connected through the proxy")
-        let watcher: ConnectWatcher = ConnectWatcher(connected: mainConnected)
+        let watcher: ProxyConnectWatcher = ProxyConnectWatcher(connected: mainConnected)
         let proxyPort: UInt16 = proxy.port
         let config: CentrifugeClientConfig = CentrifugeClientConfig(
             tlsSkipVerify: true,
             useNativeWebSocket: true,
             urlSessionConfigurationProvider: { () -> URLSessionConfiguration in
-                return RpcPoolProxyIntegrationTests.dictionaryConfiguration(proxyPort: proxyPort)
+                configurationCalls.update { (value: inout Int) -> Void in
+                    value += 1
+                }
+                let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+                configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
+                return configuration
             },
             proxyCredentialsProvider: { () -> CentrifugeProxyCredentials? in
-                providerCalls.increment()
+                credentialCalls.update { (value: inout Int) -> Void in
+                    value += 1
+                }
                 guard mainConnected.fulfillmentCount > 0 else {
                     return CentrifugeProxyCredentials(user: user, password: password)
                 }
@@ -184,11 +135,15 @@ struct RpcPoolProxyIntegrationTests {
             timeout: 10
         )
         let pool: CentrifugeRpcPool = try CentrifugeRpcPool.create(main: main, options: options)
-        defer { pool.close(completion: {}) }
+        defer {
+            pool.close(completion: {})
+        }
 
         let before: Int = proxy.connects + proxy.forwards
         let rejectedBefore: Int = proxy.rejected
-        let box: ResultBox = ResultBox()
+        let credentialCallsBefore: Int = credentialCalls.current
+        let configurationCallsBefore: Int = configurationCalls.current
+        let box: LockedBox<Result<CentrifugeRpcResult, Error>?> = LockedBox<Result<CentrifugeRpcResult, Error>?>(nil)
         let done: Expectation = Expectation("pool call settled")
         pool.rpc(
             endpointKey: "proxy-test",
@@ -201,13 +156,16 @@ struct RpcPoolProxyIntegrationTests {
         }
         await fulfillment(of: done, within: 20)
 
-        print("RpcPoolProxyIntegrationTests: proxy saw authorities \(proxy.authorities), forms \(proxy.forms)")
         return Outcome(
-            serverReplied: isServerReply(box.value),
+            serverReplied: isServerReply(box.current),
             authenticatedBefore: before,
             authenticatedAfter: proxy.connects + proxy.forwards,
             rejectedBefore: rejectedBefore,
             rejectedAfter: proxy.rejected,
+            credentialCallsBefore: credentialCallsBefore,
+            credentialCallsAfter: credentialCalls.current,
+            configurationCallsBefore: configurationCallsBefore,
+            configurationCallsAfter: configurationCalls.current,
             proxy: proxy
         )
     }
@@ -215,30 +173,42 @@ struct RpcPoolProxyIntegrationTests {
     // MARK: Secure route (wss://, CONNECT through the HTTPS keys, pool connections on the main client's transport)
 
     @Test func secureRightCredentialsReachServerThroughPool() async throws {
-        guard let host = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runPoolCase(poolScheme: "wss", poolPort: 8443, mode: .right, host: host)
         #expect(outcome.serverReplied, "the pool call got no answer of the server; rejections: \(outcome.proxy.rejections)")
         #expect(outcome.authenticatedAfter > outcome.authenticatedBefore,
                 "no authenticated request by a pool connection; rejections: \(outcome.proxy.rejections)")
         #expect(outcome.rejectedAfter > outcome.rejectedBefore, "the pool's connection was never asked for credentials")
         #expect(outcome.proxy.authorities.contains("\(host):8443"), "authorities: \(outcome.proxy.authorities)")
+        #expect(outcome.configurationCallsAfter > outcome.configurationCallsBefore,
+                "the pool's connection did not ask the main client's configuration provider")
+        #expect(outcome.credentialCallsAfter > outcome.credentialCallsBefore,
+                "the pool's connection did not ask the main client's credentials provider")
     }
 
     @Test func secureWrongPasswordPoolCallFailsWithoutDirectFallback() async throws {
-        guard let host = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runPoolCase(poolScheme: "wss", poolPort: 8443, mode: .wrongPassword, host: host)
         // The host resolves directly, so a direct pool connection would be answered by the server.
         #expect(!outcome.serverReplied, "the server answered a pool call without the right credentials")
         #expect(outcome.authenticatedAfter == outcome.authenticatedBefore, "a pool connection was authenticated")
         #expect(outcome.rejectedAfter > outcome.rejectedBefore, "no pool connection reached the proxy")
+        #expect(outcome.configurationCallsAfter > outcome.configurationCallsBefore,
+                "the pool's connection did not ask the main client's configuration provider")
+        #expect(outcome.credentialCallsAfter > outcome.credentialCallsBefore,
+                "the pool's connection did not ask the main client's credentials provider")
     }
 
     @Test func secureNilProviderPoolCallFailsWithoutDirectFallback() async throws {
-        guard let host = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runPoolCase(poolScheme: "wss", poolPort: 8443, mode: .providerReturnsNil, host: host)
         #expect(!outcome.serverReplied, "the server answered a pool call without credentials")
         #expect(outcome.authenticatedAfter == outcome.authenticatedBefore, "a pool connection was authenticated")
         #expect(outcome.rejectedAfter > outcome.rejectedBefore, "no pool connection reached the proxy")
+        #expect(outcome.configurationCallsAfter > outcome.configurationCallsBefore,
+                "the pool's connection did not ask the main client's configuration provider")
+        #expect(outcome.credentialCallsAfter > outcome.credentialCallsBefore,
+                "the pool's connection did not ask the main client's credentials provider")
     }
 
     // MARK: Platform limitation
@@ -247,11 +217,13 @@ struct RpcPoolProxyIntegrationTests {
         // The proxy's 407 to an absolute-form request gets no challenge from Apple's networking, so the pool's
         // plain connections fail at the proxy. They fail closed: no server reply unless the proxy saw an
         // authenticated request.
-        guard let host = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         // The plain server on 8000 answers a direct connection; the proxy never forwards there.
         let outcome: Outcome = try await runPoolCase(poolScheme: "ws", poolPort: 8000, mode: .right, host: host)
         #expect(outcome.rejectedAfter > outcome.rejectedBefore, "no pool connection reached the proxy")
         #expect(!outcome.serverReplied, "the server answered a plain pool call that went around the proxy")
+        #expect(outcome.configurationCallsAfter > outcome.configurationCallsBefore,
+                "the pool's connection did not ask the main client's configuration provider")
     }
 
     // MARK: Redirect fetches
@@ -290,7 +262,9 @@ struct RpcPoolProxyIntegrationTests {
             serverPort: 8443,
             tlsSkipVerify: true,
             configuration: { (proxyPort: UInt16) -> URLSessionConfiguration in
-                return RpcPoolProxyIntegrationTests.dictionaryConfiguration(proxyPort: proxyPort)
+                let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+                configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
+                return configuration
             }
         )
     }
@@ -346,7 +320,7 @@ struct RpcPoolProxyIntegrationTests {
         let proxyPort: UInt16 = proxy.port
         let fetchStarted: LockedBox<Bool> = LockedBox<Bool>(false)
         let mainConnected: Expectation = Expectation("main connected through the proxy")
-        let watcher: ConnectWatcher = ConnectWatcher(connected: mainConnected)
+        let watcher: ProxyConnectWatcher = ProxyConnectWatcher(connected: mainConnected)
         let configurationProvider: URLSessionConfigurationProvider = { () -> URLSessionConfiguration in
             return route.configuration(proxyPort)
         }
@@ -390,9 +364,11 @@ struct RpcPoolProxyIntegrationTests {
             }
         )
         let pool: CentrifugeRpcPool = try CentrifugeRpcPool.create(main: main, options: options)
-        defer { pool.close(completion: {}) }
+        defer {
+            pool.close(completion: {})
+        }
 
-        let box: ResultBox = ResultBox()
+        let box: LockedBox<Result<CentrifugeRpcResult, Error>?> = LockedBox<Result<CentrifugeRpcResult, Error>?>(nil)
         let done: Expectation = Expectation("pool call settled")
         pool.rpc(
             endpointKey: "proxy-test",
@@ -405,13 +381,12 @@ struct RpcPoolProxyIntegrationTests {
         }
         await fulfillment(of: done, within: 20)
 
-        print("RpcPoolProxyIntegrationTests: proxy saw authorities \(proxy.authorities), forms \(proxy.forms)")
         return FetchOutcome(
             hookCalled: fetchStarted.current,
             fetchAuthenticated: proxy.authorities.contains("\(host):9443"),
             rejectedBefore: rejectedAtFetch.current,
             rejectedAfter: proxy.rejected,
-            redirectFailed: isRedirectFailure(box.value),
+            redirectFailed: isRedirectFailure(box.current),
             proxy: proxy
         )
     }
@@ -419,7 +394,7 @@ struct RpcPoolProxyIntegrationTests {
     // The fetch of the dictionary route goes through the HTTPS keys of the proxy dictionary.
 
     @Test func redirectFetchPassesTheProxyDictionaryWithTheMainCredentials() async throws {
-        guard let host: String = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: FetchOutcome = try await runFetchCase(
             route: RpcPoolProxyIntegrationTests.dictionaryFetchRoute(),
             mode: .right,
@@ -431,7 +406,7 @@ struct RpcPoolProxyIntegrationTests {
     }
 
     @Test func redirectFetchWithAWrongPasswordNeverPassesTheProxyDictionary() async throws {
-        guard let host: String = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: FetchOutcome = try await runFetchCase(
             route: RpcPoolProxyIntegrationTests.dictionaryFetchRoute(),
             mode: .wrongPassword,
@@ -444,7 +419,7 @@ struct RpcPoolProxyIntegrationTests {
     }
 
     @Test func redirectFetchWithoutCredentialsNeverPassesTheProxyDictionary() async throws {
-        guard let host: String = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: FetchOutcome = try await runFetchCase(
             route: RpcPoolProxyIntegrationTests.dictionaryFetchRoute(),
             mode: .providerReturnsNil,
@@ -462,7 +437,7 @@ struct RpcPoolProxyIntegrationTests {
         guard #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) else {
             return
         }
-        guard let host: String = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: FetchOutcome = try await runFetchCase(
             route: RpcPoolProxyIntegrationTests.proxyConfigurationsFetchRoute(),
             mode: .right,
@@ -477,7 +452,7 @@ struct RpcPoolProxyIntegrationTests {
         guard #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *) else {
             return
         }
-        guard let host: String = RpcPoolProxyIntegrationTests.proxyHost() else { return }
+        let host: String = try #require(proxyTestHost())
         let outcome: FetchOutcome = try await runFetchCase(
             route: RpcPoolProxyIntegrationTests.proxyConfigurationsFetchRoute(),
             mode: .wrongPassword,

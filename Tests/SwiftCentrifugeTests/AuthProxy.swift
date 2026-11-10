@@ -1,6 +1,9 @@
 import Foundation
 import Network
 
+/// Thrown by `AuthProxy.start()` when the listener does not become ready in time.
+struct AuthProxyNotReady: Error {}
+
 /// An in-process HTTP proxy that asks for Basic credentials, for the integration test of the native
 /// transport's proxy support.
 ///
@@ -45,7 +48,6 @@ final class AuthProxy: @unchecked Sendable {
     private var connectCount: Int = 0
     private var forwardCount: Int = 0
     private var recordedAuthorities: [String] = []
-    private var recordedForms: [String] = []
     private var recordedRejections: [String] = []
 
     init(user: String, password: String, upstreamPort: UInt16) {
@@ -78,11 +80,6 @@ final class AuthProxy: @unchecked Sendable {
         return locked { recordedAuthorities }
     }
 
-    /// The form of every authenticated request, `CONNECT` or `absolute`, in order.
-    var forms: [String] {
-        return locked { recordedForms }
-    }
-
     /// The request line and the header names of every request answered with 407, in order.
     var rejections: [String] {
         return locked { recordedRejections }
@@ -101,7 +98,10 @@ final class AuthProxy: @unchecked Sendable {
         }
         self.listener = listener
         listener.start(queue: queue)
-        _ = ready.wait(timeout: .now() + 5)
+        if ready.wait(timeout: .now() + 5) != .success {
+            listener.cancel()
+            throw AuthProxyNotReady()
+        }
     }
 
     func stop() {
@@ -129,7 +129,9 @@ final class AuthProxy: @unchecked Sendable {
     /// Reads from the client until the exchange is taken over (tunnel or forward) or closed.
     private func readMore(_ exchange: Exchange) {
         exchange.client.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
+            guard let self = self else {
+                return
+            }
             if let data = data, !data.isEmpty {
                 exchange.buffer.append(data)
             }
@@ -188,7 +190,6 @@ final class AuthProxy: @unchecked Sendable {
             locked {
                 connectCount += 1
                 recordedAuthorities.append(target)
-                recordedForms.append("CONNECT")
             }
             openUpstream(exchange, takeover: .tunnel)
             return false
@@ -203,7 +204,6 @@ final class AuthProxy: @unchecked Sendable {
             locked {
                 forwardCount += 1
                 recordedAuthorities.append("\(host):\(port)")
-                recordedForms.append("absolute")
             }
             // The rewritten request goes upstream without the proxy's credentials.
             var rewritten: [String] = ["\(method) \(origin) \(version)"]

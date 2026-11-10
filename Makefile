@@ -17,7 +17,7 @@ proto: proto-check-tools
 	protoc --swift_out=Sources/SwiftCentrifuge client.proto
 
 # Runs the suite with or without Xcode installed - swift-testing ships with the
-# Command Line Tools, the script just wires up its search paths. See CLAUDE.md.
+# Command Line Tools, the script just wires up its search paths.
 test:
 	./scripts/test.sh
 
