@@ -157,8 +157,8 @@ final class NativeWebSocket: NSObject, WebSocketInterface, URLSessionWebSocketDe
         // We copied this workaround from Signal-iOS web socket implementation
         var httpAdditionalHeaders = configuration.httpAdditionalHeaders ?? .init()
         request.allHTTPHeaderFields?.forEach { header in
-            // The subprotocol is the task's (see connect()). A request header of that name would compete
-            // with it; when the task was started from the request, the transport replaced that header.
+            // The subprotocol is the task's (see connect()). A header of that name, which the request gets
+            // from the configured headers, would compete with it, so it is left out.
             if header.key.caseInsensitiveCompare("Sec-WebSocket-Protocol") == .orderedSame {
                 return
             }
