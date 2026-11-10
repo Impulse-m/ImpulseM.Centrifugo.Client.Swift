@@ -202,5 +202,61 @@ struct RpcPoolFetchSessionsTests {
         let oneClass: [AnyClass] = [MarkerProtocol.self]
         classesRight.protocolClasses = oneClass
         #expect(!sameRedirectTransport(classesLeft, classesRight))
+
+        if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+            let tlsMinimumLeft: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            let tlsMinimumRight: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            tlsMinimumLeft.tlsMinimumSupportedProtocolVersion = .TLSv12
+            tlsMinimumRight.tlsMinimumSupportedProtocolVersion = .TLSv13
+            #expect(!sameRedirectTransport(tlsMinimumLeft, tlsMinimumRight))
+            tlsMinimumRight.tlsMinimumSupportedProtocolVersion = .TLSv12
+            #expect(sameRedirectTransport(tlsMinimumLeft, tlsMinimumRight))
+
+            let tlsMaximumLeft: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            let tlsMaximumRight: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            tlsMaximumLeft.tlsMaximumSupportedProtocolVersion = .TLSv13
+            tlsMaximumRight.tlsMaximumSupportedProtocolVersion = .TLSv12
+            #expect(!sameRedirectTransport(tlsMaximumLeft, tlsMaximumRight))
+        }
+    }
+
+
+    @Test func proxyConfigurationsNeverCompareAsTheSame() {
+        guard #available(
+            macOS 14.0,
+            iOS 17.0,
+            watchOS 10.0,
+            tvOS 17.0,
+            *
+        ) else {
+            return
+        }
+        let leftEndpoint: NWEndpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: 3128)!
+        )
+        let rightEndpoint: NWEndpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: 3128)!
+        )
+        let leftProxy: ProxyConfiguration = ProxyConfiguration(httpCONNECTProxy: leftEndpoint)
+        let rightProxy: ProxyConfiguration = ProxyConfiguration(httpCONNECTProxy: rightEndpoint)
+        let left: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        left.proxyConfigurations = [leftProxy]
+        let right: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        right.proxyConfigurations = [rightProxy]
+        #expect(!sameRedirectTransport(left, right))
+
+        let withoutProxy: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        #expect(!sameRedirectTransport(left, withoutProxy))
+    }
+
+
+    @Test func nilAndEmptySettingsAreDifferent() {
+        let emptyLeft: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        emptyLeft.connectionProxyDictionary = [AnyHashable: Any]()
+        let nilRight: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+        nilRight.connectionProxyDictionary = nil
+        #expect(!sameRedirectTransport(emptyLeft, nilRight))
     }
 }

@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Testing
 @testable import SwiftCentrifuge
 
@@ -23,72 +22,17 @@ import Testing
 @Suite(.serialized, .timeLimit(.minutes(2)), .enabled(if: proxyTestHost() != nil, "CENTRIFUGE_PROXY_TEST_HOST is not set"))
 struct ProxyAuthIntegrationTests {
 
-    /// How the credentials provider answers the proxy's challenge.
-    private enum CredentialMode {
-        case right
-        case wrongPassword
-        case providerReturnsNil
-    }
-
-    /// One way to route the client through the proxy.
-    private struct Route {
-        let endpointScheme: String
-        let upstreamPort: UInt16
-        let tlsSkipVerify: Bool
-        /// Sets the proxy on the session configuration, given the proxy's port.
-        let configure: (URLSessionConfiguration, UInt16) -> Void
-    }
-
     private struct Outcome {
         let connected: Bool
         let providerCalls: Int
         let proxy: AuthProxy
     }
 
-    /// `wss://` on 8443 behind the HTTPS keys: the CONNECT is where Apple asks for credentials.
-    private static func secureDictionaryRoute() -> Route {
-        return Route(
-            endpointScheme: "wss",
-            upstreamPort: 8443,
-            tlsSkipVerify: true,
-            configure: { configuration, proxyPort in
-                configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
-            }
-        )
-    }
-
-    /// `ws://` on 8000 behind the HTTP and HTTPS keys: the platform never asks for credentials.
-    private static func plainDictionaryRoute() -> Route {
-        return Route(
-            endpointScheme: "ws",
-            upstreamPort: 8000,
-            tlsSkipVerify: false,
-            configure: { configuration, proxyPort in
-                configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
-            }
-        )
-    }
-
-    /// `ws://` on 8000 behind `proxyConfigurations` (iOS 17 / macOS 14): a CONNECT, with credentials asked.
-    @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
-    private static func proxyConfigurationRoute() -> Route {
-        return Route(
-            endpointScheme: "ws",
-            upstreamPort: 8000,
-            tlsSkipVerify: false,
-            configure: { configuration, proxyPort in
-                let proxyEndpoint: NWEndpoint = NWEndpoint.hostPort(
-                    host: "127.0.0.1", port: NWEndpoint.Port(rawValue: proxyPort)!)
-                configuration.proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: proxyEndpoint)]
-            }
-        )
-    }
-
     /// Starts a proxy and a client on `route`, and runs them for `timeout` seconds. With
     /// `waitForConnect`, it returns as soon as the client connects, or after `timeout`.
     private func runCase(
-        _ route: Route,
-        _ mode: CredentialMode,
+        _ route: ProxyRoute,
+        _ mode: ProxyCredentialMode,
         host: String,
         timeout: TimeInterval,
         waitForConnect: Bool
@@ -96,7 +40,7 @@ struct ProxyAuthIntegrationTests {
         let user: String = "user-" + UUID().uuidString.prefix(8)
         let password: String = "pw-" + UUID().uuidString
 
-        let proxy: AuthProxy = AuthProxy(user: user, password: password, upstreamPort: route.upstreamPort)
+        let proxy: AuthProxy = AuthProxy(user: user, password: password, upstreamPort: route.serverPort)
         try proxy.start()
         defer { proxy.stop() }
 
@@ -105,25 +49,14 @@ struct ProxyAuthIntegrationTests {
         let connected: Expectation = Expectation("connected through the proxy")
         let watcher: ProxyConnectWatcher = ProxyConnectWatcher(connected: connected)
 
-        let configurationProvider: URLSessionConfigurationProvider = {
-            let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
-            route.configure(configuration, proxy.port)
-            return configuration
+        let configurationProvider: URLSessionConfigurationProvider = { () -> URLSessionConfiguration in
+            return route.configuration(proxy.port)
         }
         let credentialsProvider: CentrifugeProxyCredentialsProvider = {
             providerCalls.update { (value: inout Int) -> Void in
                 value += 1
             }
-            switch mode {
-                case .right:
-                    return CentrifugeProxyCredentials(user: user, password: password)
-
-                case .wrongPassword:
-                    return CentrifugeProxyCredentials(user: user, password: "wrong-" + password)
-
-                case .providerReturnsNil:
-                    return nil
-            }
+            return proxyCredentials(mode: mode, user: user, password: password)
         }
         let config: CentrifugeClientConfig = CentrifugeClientConfig(
             tlsSkipVerify: route.tlsSkipVerify,
@@ -132,7 +65,7 @@ struct ProxyAuthIntegrationTests {
             proxyCredentialsProvider: credentialsProvider
         )
         let client: CentrifugeClient = CentrifugeClient(
-            endpoint: "\(route.endpointScheme)://\(host):\(route.upstreamPort)/connection/websocket",
+            endpoint: "\(route.scheme)://\(host):\(route.serverPort)/connection/websocket",
             config: config,
             delegate: watcher
         )
@@ -172,7 +105,7 @@ struct ProxyAuthIntegrationTests {
         }
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.proxyConfigurationRoute(), .right,
+            proxyConfigurationsProxyRoute(), .right,
             host: host, timeout: 10, waitForConnect: true
         )
         expectConnectedThroughProxy(outcome, authority: "\(host):8000")
@@ -184,7 +117,7 @@ struct ProxyAuthIntegrationTests {
         }
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.proxyConfigurationRoute(), .wrongPassword,
+            proxyConfigurationsProxyRoute(), .wrongPassword,
             host: host, timeout: 5, waitForConnect: false
         )
         expectNotConnected(outcome)
@@ -196,7 +129,7 @@ struct ProxyAuthIntegrationTests {
         }
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.proxyConfigurationRoute(), .providerReturnsNil,
+            proxyConfigurationsProxyRoute(), .providerReturnsNil,
             host: host, timeout: 5, waitForConnect: false
         )
         expectNotConnected(outcome)
@@ -207,7 +140,7 @@ struct ProxyAuthIntegrationTests {
     @Test func secureDictionaryRightCredentialsConnect() async throws {
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.secureDictionaryRoute(), .right,
+            secureDictionaryProxyRoute(), .right,
             host: host, timeout: 10, waitForConnect: true
         )
         expectConnectedThroughProxy(outcome, authority: "\(host):8443")
@@ -216,7 +149,7 @@ struct ProxyAuthIntegrationTests {
     @Test func secureDictionaryWrongPasswordNeverConnects() async throws {
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.secureDictionaryRoute(), .wrongPassword,
+            secureDictionaryProxyRoute(), .wrongPassword,
             host: host, timeout: 5, waitForConnect: false
         )
         expectNotConnected(outcome)
@@ -225,7 +158,7 @@ struct ProxyAuthIntegrationTests {
     @Test func secureDictionaryNilProviderNeverConnects() async throws {
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.secureDictionaryRoute(), .providerReturnsNil,
+            secureDictionaryProxyRoute(), .providerReturnsNil,
             host: host, timeout: 5, waitForConnect: false
         )
         expectNotConnected(outcome)
@@ -239,7 +172,7 @@ struct ProxyAuthIntegrationTests {
         // through an authenticated request, and the proxy must have refused it.
         let host: String = try #require(proxyTestHost())
         let outcome: Outcome = try await runCase(
-            ProxyAuthIntegrationTests.plainDictionaryRoute(), .right,
+            plainDictionaryProxyRoute(), .right,
             host: host, timeout: 5, waitForConnect: false
         )
         #expect(outcome.proxy.rejected >= 1, "rejections: \(outcome.proxy.rejections)")

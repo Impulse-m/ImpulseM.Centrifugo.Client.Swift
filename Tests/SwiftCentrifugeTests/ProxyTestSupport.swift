@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import SwiftCentrifuge
 
@@ -67,13 +68,82 @@ func makeProxyChallenge(
     )
 }
 
-/// In CI the proxy suites must run; a run that lost the variable fails here instead of skipping them unseen.
-@Suite struct ProxyTestEnvironmentTests {
-    @Test func proxySuitesRunInCI() {
-        let continuousIntegration: String? = ProcessInfo.processInfo.environment["CI"]
-        guard continuousIntegration == "true" else {
-            return
-        }
-        #expect(proxyTestHost() != nil, "CENTRIFUGE_PROXY_TEST_HOST is not set in CI, so the proxy suites were skipped")
+/// How a credentials provider of the proxy tests answers the proxy's challenge.
+enum ProxyCredentialMode {
+    case right
+    case wrongPassword
+    case providerReturnsNil
+}
+
+/// The credentials that a provider of the proxy tests returns for `mode`: the right ones, the right user with a wrong
+/// password, or none.
+func proxyCredentials(mode: ProxyCredentialMode, user: String, password: String) -> CentrifugeProxyCredentials? {
+    switch mode {
+        case .right:
+            return CentrifugeProxyCredentials(user: user, password: password)
+
+        case .wrongPassword:
+            return CentrifugeProxyCredentials(user: user, password: "wrong-" + password)
+
+        case .providerReturnsNil:
+            return nil
     }
+}
+
+/// One way to route a client through the test proxy.
+struct ProxyRoute {
+    /// The scheme of the endpoint, `ws` or `wss`.
+    let scheme: String
+    /// The port of the server. The test proxy sends every request there.
+    let serverPort: UInt16
+    let tlsSkipVerify: Bool
+    /// The session configuration of the client, given the proxy's port.
+    let configuration: (UInt16) -> URLSessionConfiguration
+}
+
+/// `wss://` on 8443 behind the HTTPS keys: the CONNECT is where Apple asks for credentials.
+func secureDictionaryProxyRoute() -> ProxyRoute {
+    return ProxyRoute(
+        scheme: "wss",
+        serverPort: 8443,
+        tlsSkipVerify: true,
+        configuration: { (proxyPort: UInt16) -> URLSessionConfiguration in
+            let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
+            return configuration
+        }
+    )
+}
+
+/// `ws://` on 8000 behind the HTTP and HTTPS keys: the platform never asks for credentials.
+func plainDictionaryProxyRoute() -> ProxyRoute {
+    return ProxyRoute(
+        scheme: "ws",
+        serverPort: 8000,
+        tlsSkipVerify: false,
+        configuration: { (proxyPort: UInt16) -> URLSessionConfiguration in
+            let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            configuration.connectionProxyDictionary = proxyDictionary(proxyPort: proxyPort)
+            return configuration
+        }
+    )
+}
+
+/// `ws://` on 8000 behind `proxyConfigurations` (iOS 17 / macOS 14): a CONNECT, with credentials asked.
+@available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
+func proxyConfigurationsProxyRoute() -> ProxyRoute {
+    return ProxyRoute(
+        scheme: "ws",
+        serverPort: 8000,
+        tlsSkipVerify: false,
+        configuration: { (proxyPort: UInt16) -> URLSessionConfiguration in
+            let configuration: URLSessionConfiguration = URLSessionConfiguration.ephemeral
+            let proxyEndpoint: NWEndpoint = NWEndpoint.hostPort(
+                host: "127.0.0.1",
+                port: NWEndpoint.Port(rawValue: proxyPort)!
+            )
+            configuration.proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: proxyEndpoint)]
+            return configuration
+        }
+    )
 }
